@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KRAFT Terminal</title>
+  <meta name="description" content="Crypto, crypto-equity and AI stock tracker with portfolio, watchlist, alerts and a thesis journal.">
+  <meta name="theme-color" content="#000000">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Cpath d='M9 7v18M9 16l12-9M13 13l9 12' stroke='%2339FF14' stroke-width='2.4' fill='none' stroke-linecap='square'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter+Tight:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/terminal.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap bar">
+      <a class="wordmark" href="https://elian.ink" aria-label="KRAFT home">KRAFT<span aria-hidden="true">.</span></a>
+      <span class="mono crumb">/ Terminal</span>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+        <button role="tab" data-tab="portfolio" aria-selected="false">Portfolio</button>
+        <button role="tab" data-tab="watchlist" aria-selected="false">Watchlist</button>
+        <button role="tab" data-tab="charts" aria-selected="false">Charts</button>
+        <button role="tab" data-tab="alerts" aria-selected="false">Alerts<span class="count" id="alert-count" hidden>0</span></button>
+        <button role="tab" data-tab="journal" aria-selected="false">Journal</button>
+        <button role="tab" data-tab="data" aria-selected="false">Data</button>
+      </nav>
+    </div>
+    <div class="status">
+      <div class="wrap status-row mono" aria-live="polite">
+        <span><i class="dot" id="st-dot" aria-hidden="true"></i><span id="st-label">Connecting</span></span>
+        <span id="st-updated"></span>
+        <span id="st-cover"></span>
+        <span class="push" id="st-clock"></span>
+        <button class="linkbtn" id="refresh-btn" type="button">Refresh</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="wrap">
+      <div class="banner" id="banner" hidden><span class="mono">Notice</span><span id="banner-text"></span></div>
+
+      <!-- 01 OVERVIEW -->
+      <section class="view" id="view-overview" aria-labelledby="ov-h">
+        <header class="section-head">
+          <p class="mono">01 — Overview</p>
+          <h2 id="ov-h">Market</h2>
+          <p class="note">Crypto, crypto equities and AI names on one sheet. Stock prices refresh every minute in market hours; crypto trades around the clock.</p>
+        </header>
+        <div class="grid g4" id="ov-stats"></div>
+
+        <div class="sub-head"><h3>24-hour movers</h3><span class="mono">vs previous close</span></div>
+        <div class="grid g2" id="ov-movers-24h"></div>
+
+        <div class="sub-head"><h3>7-day movers</h3><span class="mono">vs close one week ago</span></div>
+        <div class="grid g2" id="ov-movers-7d"></div>
+
+        <div class="sub-head">
+          <h3>Heatmap</h3>
+          <div class="tools">
+            <div class="chipset" role="group" aria-label="Heatmap period" id="hm-period">
+              <button type="button" data-period="24h" aria-pressed="true">24h</button>
+              <button type="button" data-period="7d" aria-pressed="false">7D</button>
+            </div>
+            <span class="mono">Click a cell for its chart</span>
+          </div>
+        </div>
+        <div id="heatmap"></div>
+      </section>
+
+      <!-- 02 PORTFOLIO -->
+      <section class="view" id="view-portfolio" aria-labelledby="pf-h" hidden>
+        <header class="section-head">
+          <p class="mono">02 — Portfolio</p>
+          <h2 id="pf-h">Holdings</h2>
+          <p class="note">Positions are stored in this browser only. Use the Data tab to export a backup or move them to another device.</p>
+        </header>
+        <div class="grid g6" id="pf-stats"></div>
+        <div class="sub-head"><h3>Positions</h3><div class="tools"><button class="btn" type="button" data-action="add-position">Add position</button></div></div>
+        <div class="table-wrap" id="pf-table"></div>
+        <div class="sub-head"><h3>Allocation</h3><span class="mono">by current value</span></div>
+        <div id="pf-alloc"></div>
+      </section>
+
+      <!-- 03 WATCHLIST -->
+      <section class="view" id="view-watchlist" aria-labelledby="wl-h" hidden>
+        <header class="section-head">
+          <p class="mono">03 — Watchlist</p>
+          <h2 id="wl-h">Watchlist</h2>
+          <p class="note">Add any Yahoo Finance ticker: US stocks (NVDA), other listings (SHOP.TO) or crypto pairs (ETH-USD). The signal is a mechanical score, not advice; the guide explains it.</p>
+        </header>
+        <div class="sub-head">
+          <div class="chipset" role="group" aria-label="Filter by group" id="wl-groups"></div>
+          <div class="tools">
+            <button class="btn ghost small" type="button" data-action="metrics-help">Metrics guide</button>
+            <form class="inline" id="wl-add-form" autocomplete="off">
+              <label class="visually-hidden" for="wl-add">Ticker to add</label>
+              <input id="wl-add" class="mono-in" placeholder="Add ticker" maxlength="15" style="width:130px">
+              <button class="btn" type="submit">Add</button>
+            </form>
+          </div>
+        </div>
+        <div class="grid g4" id="wl-grid"></div>
+      </section>
+
+      <!-- 04 CHARTS -->
+      <section class="view" id="view-charts" aria-labelledby="ch-h" hidden>
+        <header class="section-head">
+          <p class="mono">04 — Charts</p>
+          <h2 id="ch-h">Charts</h2>
+          <p class="note">TradingView charts with RSI and MACD. Swap a symbol from each chart's menu; the interval applies to every chart.</p>
+        </header>
+        <div class="sub-head">
+          <div class="chipset" role="group" aria-label="Interval" id="ch-interval">
+            <button type="button" data-iv="15" aria-pressed="false">15M</button>
+            <button type="button" data-iv="60" aria-pressed="false">1H</button>
+            <button type="button" data-iv="240" aria-pressed="false">4H</button>
+            <button type="button" data-iv="D" aria-pressed="true">1D</button>
+            <button type="button" data-iv="W" aria-pressed="false">1W</button>
+            <button type="button" data-iv="M" aria-pressed="false">1M</button>
+          </div>
+          <div class="tools"><button class="btn" type="button" data-action="add-chart">Add chart</button></div>
+        </div>
+        <div class="grid g2" id="ch-grid"></div>
+      </section>
+
+      <!-- 05 ALERTS -->
+      <section class="view" id="view-alerts" aria-labelledby="al-h" hidden>
+        <header class="section-head">
+          <p class="mono">05 — Alerts</p>
+          <h2 id="al-h">Price alerts</h2>
+          <p class="note">Checked after every refresh while this page is open in a tab. For alerts while it's closed, set them in TradingView, which runs them on its own servers.</p>
+        </header>
+
+        <div class="panel">
+          <div class="panel-h">New alert</div>
+          <form id="alert-form" class="form-row" autocomplete="off">
+            <label class="f"><span>Symbol</span><select id="al-sym" class="mono-in" required></select></label>
+            <label class="f"><span>Condition</span><select id="al-cond"><option value="above">Rises above</option><option value="below">Falls below</option></select></label>
+            <label class="f"><span>Price (USD)</span><input id="al-price" type="number" step="any" min="0" required></label>
+            <label class="f"><span>Note</span><input id="al-note" maxlength="140" placeholder="Optional"></label>
+            <div style="display:flex;align-items:end;gap:8px"><button class="btn" type="submit">Set alert</button></div>
+          </form>
+          <div class="meta-row" style="margin-top:16px"><span id="al-current">Pick a symbol to see its price</span><button class="linkbtn" type="button" data-action="notif-perm">Enable browser notifications</button></div>
+        </div>
+
+        <div class="sub-head"><h3>Active and triggered</h3><span class="mono" id="al-summary"></span></div>
+        <div id="al-list"></div>
+
+        <div class="sub-head"><h3>Notification channels</h3><span class="mono">Optional</span></div>
+        <div class="grid g3">
+          <div class="panel">
+            <div class="panel-h">ntfy push <a class="mono" href="https://ntfy.sh" target="_blank" rel="noopener">ntfy.sh ↗</a></div>
+            <p style="font-size:13.5px">Free phone push notifications, no account needed.</p>
+            <ol class="steps"><li>Install the ntfy app.</li><li>Subscribe to a topic name only you would guess.</li><li>Enter the same topic here.</li></ol>
+            <div class="inline"><input id="int-ntfy" placeholder="your-private-topic" class="mono-in" style="text-transform:none"><button class="btn" type="button" data-action="save-int" data-kind="ntfy">Save &amp; test</button></div>
+            <div class="status-msg" id="int-ntfy-msg"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-h">Discord webhook <a class="mono" href="https://support.discord.com/hc/en-us/articles/228383668" target="_blank" rel="noopener">Guide ↗</a></div>
+            <p style="font-size:13.5px">Posts each alert to a channel; Discord's app pushes it to your phone.</p>
+            <ol class="steps"><li>Channel settings → Integrations → Webhooks.</li><li>Create one and copy its URL.</li><li>Paste it here.</li></ol>
+            <div class="inline"><input id="int-discord" placeholder="https://discord.com/api/webhooks/…" style="font-size:12px"><button class="btn" type="button" data-action="save-int" data-kind="discord">Save &amp; test</button></div>
+            <div class="status-msg" id="int-discord-msg"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-h">Page closed?</div>
+            <p style="font-size:13.5px">Browser, ntfy and Discord alerts only fire while this tab is open. TradingView's own alerts run on its servers around the clock and can push to its app or email.</p>
+            <div class="card-actions" style="margin-top:16px">
+              <a class="btn ghost small" href="https://www.tradingview.com/chart/" target="_blank" rel="noopener">Open TradingView ↗</a>
+              <a class="btn ghost small" href="https://www.tradingview.com/support/solutions/43000529348-how-to-set-an-alert/" target="_blank" rel="noopener">Alert guide ↗</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 06 JOURNAL -->
+      <section class="view" id="view-journal" aria-labelledby="jn-h" hidden>
+        <header class="section-head">
+          <p class="mono">06 — Journal</p>
+          <h2 id="jn-h">Snapshot journal</h2>
+          <p class="note">Write down a thesis and lock in today's prices. Every entry keeps score: each asset shows its move since the snapshot, and the entry shows the average.</p>
+        </header>
+        <div class="sub-head">
+          <div class="chipset" role="group" aria-label="Filter by tag" id="jn-tags"></div>
+          <div class="tools"><button class="btn" type="button" data-action="new-snapshot">New snapshot</button></div>
+        </div>
+        <div class="grid g2" id="jn-list"></div>
+      </section>
+
+      <!-- 07 DATA -->
+      <section class="view" id="view-data" aria-labelledby="dt-h" hidden>
+        <header class="section-head">
+          <p class="mono">07 — Data</p>
+          <h2 id="dt-h">Data &amp; sources</h2>
+          <p class="note">Everything you enter lives in this browser's storage. Export a backup file now and then, and use it to move your journal and positions to another device or domain.</p>
+        </header>
+        <div class="grid g3">
+          <div class="panel">
+            <div class="panel-h">Backup</div>
+            <p style="font-size:13.5px" id="dt-counts"></p>
+            <div class="card-actions" style="margin-top:16px">
+              <button class="btn" type="button" data-action="export">Export JSON</button>
+              <label class="btn ghost" style="display:inline-block">Import JSON<input type="file" id="import-file" accept="application/json,.json" hidden></label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-h">Moving from CRYPTERM</div>
+            <p style="font-size:13.5px">Saved data belongs to the web address it was entered on. Open the old address (spiffy-cucurucho-45510a.netlify.app), which now runs this version, then export there and import here.</p>
+          </div>
+          <div class="panel">
+            <div class="panel-h">Reset</div>
+            <p style="font-size:13.5px">Clears positions, alerts, journal and notes from this browser and restores the default watchlist.</p>
+            <div class="card-actions" style="margin-top:16px"><button class="btn ghost danger" type="button" data-action="reset">Reset everything</button></div>
+          </div>
+        </div>
+
+        <div class="sub-head"><h3>Pipeline health</h3><span class="mono" id="dt-when"></span></div>
+        <div class="table-wrap"><table class="data" id="dt-sources"></table></div>
+
+        <div class="sub-head"><h3>Symbols without data</h3><span class="mono" id="dt-err-count"></span></div>
+        <div class="table-wrap"><table class="data" id="dt-errors"></table></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap mono">
+      <span>KRAFT Terminal · For information only, not investment advice</span>
+      <span>Data: Yahoo Finance, Stooq, <a href="https://www.coingecko.com" target="_blank" rel="noopener">CoinGecko</a>, charts by TradingView</span>
+      <a href="https://elian.ink">elian.ink</a>
+    </div>
+  </footer>
+
+  <dialog id="modal" aria-labelledby="modal-title">
+    <div class="m-head"><h3 id="modal-title"></h3><button class="linkbtn" type="button" data-action="close-modal" aria-label="Close">Close</button></div>
+    <div class="m-body" id="modal-body"></div>
+  </dialog>
+
+  <div class="tip" id="tip" role="tooltip"></div>
+
+  <script src="/assets/assets.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
