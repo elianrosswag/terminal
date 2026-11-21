@@ -42,8 +42,8 @@ window.KRAFT_ASSETS = [
     desc: 'US miner focused on low-cost power in the American South, grown largely through site acquisitions.' },
   { sym: 'CIFR', tv: 'NASDAQ:CIFR', type: 'stock', grp: 'Bitcoin miners', cat: 'BTC mining', name: 'Cipher Mining',
     desc: 'Texas-based miner on long-term power contracts, now also leasing capacity for HPC. Smaller cap, higher beta than the large miners.' },
-  { sym: 'BITF', tv: 'NASDAQ:BITF', type: 'stock', grp: 'Bitcoin miners', cat: 'BTC mining', name: 'Bitfarms',
-    desc: 'Miner with sites across the Americas, historically hydro-powered, shifting part of its footprint toward HPC.' },
+  { sym: 'KEEL', tv: 'NASDAQ:KEEL', type: 'stock', grp: 'Miners → AI/HPC', cat: 'AI / HPC infrastructure', name: 'Keel Infrastructure',
+    desc: 'Formerly Bitfarms (BITF). Renamed in April 2026 and moved to the US as it shifted from bitcoin mining to AI and high-performance computing data centres.' },
 
   // MINERS → AI/HPC
   { sym: 'CORZ', tv: 'NASDAQ:CORZ', type: 'stock', grp: 'Miners → AI/HPC', cat: 'Mining / HPC', name: 'Core Scientific',

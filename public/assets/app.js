@@ -91,7 +91,9 @@ const State = {
     if (!this.data.chartSymbols.length) this.data.chartSymbols = [...DEFAULT_CHARTS];
     if (!this.data.theme.presets || typeof this.data.theme.presets !== 'object') this.data.theme.presets = {};
     // SMLR was delisted after Strive (ASST) acquired Semler Scientific in January 2026.
-    for (const k of ['watchlist', 'chartSymbols']) this.data[k] = [...new Set(this.data[k].map(x => (x === 'SMLR' ? 'ASST' : x)))];
+    // BITF became KEEL when Bitfarms renamed itself Keel Infrastructure in April 2026.
+    const RENAMED = { SMLR: 'ASST', BITF: 'KEEL' };
+    for (const k of ['watchlist', 'chartSymbols']) this.data[k] = [...new Set(this.data[k].map(x => RENAMED[x] || x))];
     // Old builds stored ids as numbers / alerts without ids.
     this.data.alerts.forEach(a => { if (!a.id) a.id = uid(); });
   },
