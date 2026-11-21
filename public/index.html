@@ -12,6 +12,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter+Tight:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/assets/terminal.css">
+  <script src="/assets/theme.js"></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -27,7 +28,7 @@
         <button role="tab" data-tab="charts" aria-selected="false">Charts</button>
         <button role="tab" data-tab="alerts" aria-selected="false">Alerts<span class="count" id="alert-count" hidden>0</span></button>
         <button role="tab" data-tab="journal" aria-selected="false">Journal</button>
-        <button role="tab" data-tab="data" aria-selected="false">Data</button>
+        <button role="tab" data-tab="data" aria-selected="false">Settings</button>
       </nav>
     </div>
     <div class="status">
@@ -113,7 +114,7 @@
         <header class="section-head">
           <p class="mono">04 — Charts</p>
           <h2 id="ch-h">Charts</h2>
-          <p class="note">Draw Fibonacci retracements and horizontal levels; they're saved per symbol and stay put when you change timeframe. With Revolut X connected, your fills, open orders and average cost appear on the chart.</p>
+          <p class="note">Draw Fibonacci retracements, levels and notes; they're saved per symbol and stay put when you change timeframe. Double-click any drawing to comment on it. Your Revolut X and Revolut app trades, open orders and average cost appear on the chart.</p>
         </header>
         <div class="sub-head ch-bar">
           <div class="tools">
@@ -132,6 +133,7 @@
               <button type="button" data-tool="cursor" aria-pressed="true" title="Select (Esc)">Select</button>
               <button type="button" data-tool="fib" aria-pressed="false" title="Fibonacci retracement (F)">Fib</button>
               <button type="button" data-tool="hline" aria-pressed="false" title="Horizontal line (H)">Level</button>
+              <button type="button" data-tool="note" aria-pressed="false" title="Note pinned to the chart (N)">Note</button>
             </div>
             <div class="chipset" role="group" aria-label="View" id="ch-mode">
               <button type="button" data-mode="kraft" aria-pressed="true">KRAFT</button>
@@ -156,6 +158,10 @@
               <span class="mono" id="ch-src"></span>
             </div>
           </div>
+          <div class="sub-head"><h3>Notes on <span class="ch-sym-label"></span></h3><span class="mono" id="ch-note-state">Saved automatically · also shown on the watchlist card</span></div>
+          <label class="visually-hidden" for="ch-notes">Notes on this symbol</label>
+          <textarea id="ch-notes" class="ch-notes" placeholder="Thesis, key levels, what would change your mind…"></textarea>
+
           <div class="sub-head"><h3>Drawings on <span id="ch-dsym"></span></h3><div class="tools"><button class="btn ghost small danger" type="button" data-action="clear-drawings">Clear all</button></div></div>
           <div id="ch-drawings"></div>
         </div>
@@ -244,71 +250,117 @@
         <div class="grid g2" id="jn-list"></div>
 
         <div id="jn-rx" hidden>
-          <div class="sub-head"><h3>Revolut X trade log</h3><span class="mono" id="jn-rx-sum"></span></div>
+          <div class="sub-head"><h3>Trade log</h3><span class="mono" id="jn-rx-sum"></span></div>
           <div class="table-wrap" id="jn-rx-trades"></div>
         </div>
       </section>
 
-      <!-- 07 DATA -->
+      <!-- 07 SETTINGS -->
       <section class="view" id="view-data" aria-labelledby="dt-h" hidden>
         <header class="section-head">
-          <p class="mono">07 — Data</p>
-          <h2 id="dt-h">Data &amp; sources</h2>
-          <p class="note">Everything you enter lives in this browser's storage. Export a backup file now and then, and use it to move your journal and positions to another device or domain.</p>
+          <p class="mono">07 — Settings</p>
+          <h2 id="dt-h">Settings</h2>
+          <p class="note">Connections, imports, colours, backups and data health. Everything you set here is stored in this browser; export a backup to move it to another device.</p>
         </header>
-        <div class="grid g3">
-          <div class="panel">
-            <div class="panel-h">Backup</div>
-            <p style="font-size:13.5px" id="dt-counts"></p>
-            <div class="card-actions" style="margin-top:16px">
-              <button class="btn" type="button" data-action="export">Export JSON</button>
-              <label class="btn ghost" style="display:inline-block">Import JSON<input type="file" id="import-file" accept="application/json,.json" hidden></label>
+        <nav class="chipset settings-nav" aria-label="Settings sections">
+          <button type="button" data-goto="set-revx">Revolut X</button>
+          <button type="button" data-goto="set-import">Revolut statements</button>
+          <button type="button" data-goto="set-theme">Appearance</button>
+          <button type="button" data-goto="set-backup">Backup</button>
+          <button type="button" data-goto="set-health">Data health</button>
+        </nav>
+
+        <section class="settings-sec" id="set-revx" aria-labelledby="set-revx-h">
+          <div class="sub-head"><h3 id="set-revx-h">Revolut X</h3><span class="mono" id="rx-state"></span></div>
+          <div class="grid g2">
+            <div class="panel">
+              <div class="panel-h">Connection</div>
+              <p style="font-size:13.5px" id="rx-status-text">Checking…</p>
+              <form class="inline" id="rx-token-form" style="margin-top:14px" autocomplete="off">
+                <label class="visually-hidden" for="rx-token">Access token</label>
+                <input id="rx-token" type="password" placeholder="Access token (from terminal-access-token.txt)" autocomplete="off">
+                <button class="btn" type="submit">Connect</button>
+              </form>
+              <div class="card-actions" style="margin-top:12px">
+                <button class="btn ghost small" type="button" data-action="rx-sync">Sync now</button>
+                <button class="btn ghost small" type="button" data-action="rx-history">Reload trade history</button>
+                <button class="btn ghost small danger" type="button" data-action="rx-disconnect">Forget token on this browser</button>
+              </div>
+              <div class="status-msg" id="rx-msg"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-h">How it works</div>
+              <p style="font-size:13.5px">This site's server reads your Revolut X account with a read-only API key and signs each request with your private key. Both live only in Netlify's environment variables (<code>REVX_API_KEY</code>, <code>REVX_PRIVATE_KEY</code>). The access token (<code>TERMINAL_TOKEN</code>) stops anyone else using it; it's the one line in <code>_private-revolut-x/terminal-access-token.txt</code>.</p>
             </div>
           </div>
-          <div class="panel">
-            <div class="panel-h">Moving from CRYPTERM</div>
-            <p style="font-size:13.5px">Saved data belongs to the web address it was entered on. Open the old address (spiffy-cucurucho-45510a.netlify.app), which now runs this version, then export there and import here.</p>
-          </div>
-          <div class="panel">
-            <div class="panel-h">Reset</div>
-            <p style="font-size:13.5px">Clears positions, alerts, journal and notes from this browser and restores the default watchlist.</p>
-            <div class="card-actions" style="margin-top:16px"><button class="btn ghost danger" type="button" data-action="reset">Reset everything</button></div>
-          </div>
-        </div>
+        </section>
 
-        <div class="sub-head"><h3>Revolut X</h3><span class="mono" id="rx-state"></span></div>
-        <div class="grid g2">
-          <div class="panel">
-            <div class="panel-h">Connection</div>
-            <p style="font-size:13.5px" id="rx-status-text">Checking…</p>
-            <form class="inline" id="rx-token-form" style="margin-top:14px" autocomplete="off">
-              <label class="visually-hidden" for="rx-token">Access token</label>
-              <input id="rx-token" type="password" placeholder="Access token (TERMINAL_TOKEN)" autocomplete="off">
-              <button class="btn" type="submit">Connect</button>
-            </form>
-            <div class="card-actions" style="margin-top:12px">
-              <button class="btn ghost small" type="button" data-action="rx-sync">Sync now</button>
-              <button class="btn ghost small" type="button" data-action="rx-history">Reload trade history</button>
-              <button class="btn ghost small danger" type="button" data-action="rx-disconnect">Forget token on this browser</button>
+        <section class="settings-sec" id="set-import" aria-labelledby="set-import-h">
+          <div class="sub-head"><h3 id="set-import-h">Revolut statements</h3><span class="mono">Stocks &amp; crypto in the main Revolut app</span></div>
+          <div class="grid g2">
+            <div class="panel">
+              <div class="panel-h">Import a statement</div>
+              <p style="font-size:13.5px">Revolut has no API for app investments, so import its CSV statements instead. In the Revolut app: <b>Invest → More → Documents → Stocks</b> (or <b>Crypto</b>) → account statement → <b>CSV</b>, for the whole period you've held them. Each import replaces the previous one of the same kind.</p>
+              <div class="card-actions" style="margin-top:14px">
+                <label class="btn" style="display:inline-block">Choose CSV<input type="file" id="rv-file" accept=".csv,text/csv" hidden></label>
+              </div>
+              <div class="status-msg" id="rv-msg"></div>
             </div>
-            <div class="status-msg" id="rx-msg"></div>
+            <div class="panel">
+              <div class="panel-h">Imported</div>
+              <div id="rv-imported"><p class="empty" style="padding:0">Nothing imported yet.</p></div>
+            </div>
           </div>
-          <div class="panel">
-            <div class="panel-h">Setup</div>
-            <ol class="steps">
-              <li>exchange.revolut.com → Profile → API keys: create a <b>read-only</b> key with the public key from <code>_private-revolut-x/public.pem</code>. No IP whitelist.</li>
-              <li>Netlify → this project → Environment variables (scope Functions): <code>REVX_API_KEY</code>, <code>REVX_PRIVATE_KEY</code> (the whole private.pem), <code>TERMINAL_TOKEN</code>. Then redeploy.</li>
-              <li>Paste the same <code>TERMINAL_TOKEN</code> into the box on the left. It's stored only in this browser.</li>
-            </ol>
-            <p style="font-size:13px">Your balances and orders are fetched by this site's server with your key and are never cached or stored anywhere but this browser.</p>
+        </section>
+
+        <section class="settings-sec" id="set-theme" aria-labelledby="set-theme-h">
+          <div class="sub-head"><h3 id="set-theme-h">Appearance</h3><span class="mono" id="th-active"></span></div>
+          <div class="grid g2">
+            <div class="panel">
+              <div class="panel-h">Colours <span class="mono">changes preview live</span></div>
+              <div class="swatches" id="th-swatches"></div>
+              <form class="inline" id="th-save-form" style="margin-top:16px" autocomplete="off">
+                <label class="visually-hidden" for="th-name">Preset name</label>
+                <input id="th-name" maxlength="30" placeholder="Name this preset">
+                <button class="btn" type="submit">Save preset</button>
+              </form>
+            </div>
+            <div class="panel">
+              <div class="panel-h">Presets</div>
+              <ul class="presets" id="th-presets"></ul>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div class="sub-head"><h3>Pipeline health</h3><span class="mono" id="dt-when"></span></div>
-        <div class="table-wrap"><table class="data" id="dt-sources"></table></div>
+        <section class="settings-sec" id="set-backup" aria-labelledby="set-backup-h">
+          <div class="sub-head"><h3 id="set-backup-h">Backup</h3></div>
+          <div class="grid g3">
+            <div class="panel">
+              <div class="panel-h">Export &amp; import</div>
+              <p style="font-size:13.5px" id="dt-counts"></p>
+              <div class="card-actions" style="margin-top:16px">
+                <button class="btn" type="button" data-action="export">Export JSON</button>
+                <label class="btn ghost" style="display:inline-block">Import JSON<input type="file" id="import-file" accept="application/json,.json" hidden></label>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-h">Moving from CRYPTERM</div>
+              <p style="font-size:13.5px">Saved data belongs to the web address it was entered on. Open the old address (spiffy-cucurucho-45510a.netlify.app), which now runs this version, then export there and import here.</p>
+            </div>
+            <div class="panel">
+              <div class="panel-h">Reset</div>
+              <p style="font-size:13.5px">Clears positions, alerts, journal, notes, drawings, imports and colours from this browser.</p>
+              <div class="card-actions" style="margin-top:16px"><button class="btn ghost danger" type="button" data-action="reset">Reset everything</button></div>
+            </div>
+          </div>
+        </section>
 
-        <div class="sub-head"><h3>Symbols without data</h3><span class="mono" id="dt-err-count"></span></div>
-        <div class="table-wrap"><table class="data" id="dt-errors"></table></div>
+        <section class="settings-sec" id="set-health" aria-labelledby="set-health-h">
+          <div class="sub-head"><h3 id="set-health-h">Data health</h3><span class="mono" id="dt-when"></span></div>
+          <div class="table-wrap"><table class="data" id="dt-sources"></table></div>
+          <div class="sub-head"><h3>Symbols without data</h3><span class="mono" id="dt-err-count"></span></div>
+          <div class="table-wrap"><table class="data" id="dt-errors"></table></div>
+        </section>
       </section>
     </div>
   </main>
@@ -329,6 +381,7 @@
   <div class="tip" id="tip" role="tooltip"></div>
 
   <script src="/assets/vendor/lightweight-charts.js"></script>
+  <script src="/assets/statements.js"></script>
   <script src="/assets/chart.js"></script>
   <script src="/assets/assets.js"></script>
   <script src="/assets/app.js"></script>

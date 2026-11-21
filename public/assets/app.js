@@ -80,14 +80,16 @@ const State = {
     portfolio: [], watchlist: [...DEFAULT_WATCHLIST], alerts: [], journal: [],
     chartSymbols: [...DEFAULT_CHARTS], watchlistNotes: {}, custom: {},
     alertIntegrations: { ntfy: '', discord: '' }, drawings: {},
+    theme: { active: 'KRAFT', colors: null, presets: {} }, revolut: {},
   }),
   load() {
     let d = null;
     try { d = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { d = null; }
     this.data = { ...this.defaults(), ...(d && typeof d === 'object' ? d : {}) };
     for (const k of ['portfolio', 'watchlist', 'alerts', 'journal', 'chartSymbols']) if (!Array.isArray(this.data[k])) this.data[k] = this.defaults()[k];
-    for (const k of ['watchlistNotes', 'custom', 'alertIntegrations', 'drawings']) if (!this.data[k] || typeof this.data[k] !== 'object') this.data[k] = this.defaults()[k];
+    for (const k of ['watchlistNotes', 'custom', 'alertIntegrations', 'drawings', 'theme', 'revolut']) if (!this.data[k] || typeof this.data[k] !== 'object') this.data[k] = this.defaults()[k];
     if (!this.data.chartSymbols.length) this.data.chartSymbols = [...DEFAULT_CHARTS];
+    if (!this.data.theme.presets || typeof this.data.theme.presets !== 'object') this.data.theme.presets = {};
     // SMLR was delisted after Strive (ASST) acquired Semler Scientific in January 2026.
     for (const k of ['watchlist', 'chartSymbols']) this.data[k] = [...new Set(this.data[k].map(x => (x === 'SMLR' ? 'ASST' : x)))];
     // Old builds stored ids as numbers / alerts without ids.
@@ -119,7 +121,7 @@ function trackedSymbols() {
   return [...new Set([
     ...d.watchlist, ...d.portfolio.map(p => p.symbol), ...d.alerts.map(a => a.symbol),
     ...d.chartSymbols, ...d.journal.flatMap(e => (e.assets || []).map(a => a.symbol)),
-    ...rxHeldCodes(),
+    ...rxHeldCodes(), ...rvPositions().map(p => p.symbol),
   ].filter(Boolean))];
 }
 
@@ -158,6 +160,7 @@ async function fetchQuotes() {
       if (st.length) qs.set('stocks', st.join(','));
       if (i === 0 && crypto.length) qs.set('crypto', crypto.join(','));
       if (i === 0 && rx.length) qs.set('rx', rx.join(','));
+      if (i === 0 && rvNeedsFx()) qs.set('fx', '1');
       return fetch('/api/quotes?' + qs, { signal: AbortSignal.timeout(25_000) }).then(async r => {
         const b = await r.json().catch(() => null);
         if (!b) throw new Error(`HTTP ${r.status}`);
@@ -186,6 +189,7 @@ async function fetchQuotes() {
         if (q.exchange) c.exchange = q.exchange;
       }
     }
+    for (const b of bodies) if (b.fx && Object.keys(b.fx).length) { FX = b.fx; try { localStorage.setItem('kraft_terminal_fx', JSON.stringify(FX)); } catch { /* ignore */ } }
     LastResp = merged;
     FetchErr = null;
     State.save();
@@ -275,7 +279,7 @@ function render() {
 
 // ── overview ──────────────────────────────────────────────────────────────
 let hmPeriod = '24h';
-function allPositions() { return [...State.data.portfolio, ...rxPositions()]; }
+function allPositions() { return [...State.data.portfolio, ...rxPositions(), ...rvPositions()]; }
 function portfolioTotals() {
   let value = 0, cost = 0, day = 0, priced = 0;
   for (const p of allPositions()) {
@@ -325,8 +329,8 @@ function renderOverview() {
 function heatStyle(p) {
   if (!isNum(p)) return { bg: 'var(--black)', ink: false };
   const i = Math.min(Math.abs(p), 10) / 10;
-  if (p > 0) { const a = 0.1 + i * 0.75; return { bg: `rgba(57,255,20,${a.toFixed(3)})`, ink: a > 0.5 }; }
-  return { bg: `rgba(223,226,229,${(0.04 + i * 0.32).toFixed(3)})`, ink: false };
+  if (p > 0) { const a = 0.1 + i * 0.75; return { bg: KraftTheme.rgba('up', a.toFixed(3)), ink: a > 0.5 }; }
+  return { bg: KraftTheme.rgba('down', (0.06 + i * 0.4).toFixed(3)), ink: false };
 }
 function renderHeatmap() {
   const wl = State.data.watchlist;
@@ -373,9 +377,9 @@ function renderPortfolio() {
     </tr></thead><tbody>${rows.map(r => {
       const w = pt.value && r.val ? r.val / pt.value * 100 : null;
       return `<tr>
-        <td><div class="sym">${esc(r.p.symbol)}${r.p.rx ? ' <span class="pill tiny">Revolut X</span>' : ''}</div><div class="nm">${esc(r.p.notes || asset(r.p.symbol).name)}</div></td>
+        <td><div class="sym">${esc(r.p.symbol)}${r.p.rx ? ' <span class="pill tiny">Revolut X</span>' : r.p.rv ? ' <span class="pill tiny">Revolut</span>' : ''}</div><div class="nm">${esc(r.p.notes || asset(r.p.symbol).name)}</div></td>
         <td>${r.p.shares.toLocaleString('en-US', { maximumFractionDigits: 8 })}</td>
-        <td title="${r.p.rx ? esc(r.p.costNote || '') : ''}">${fmt.price(r.p.avgCost)}${r.p.partial ? '<span class="na">*</span>' : ''}</td>
+        <td title="${r.p.rx || r.p.rv ? esc(r.p.costNote || '') : ''}">${fmt.price(r.p.avgCost)}${r.p.partial ? '<span class="na">*</span>' : ''}</td>
         <td class="${flash(r.p.symbol)}">${fmt.price(r.price)}</td>
         <td>${pctSpan(r.d?.changePct)}</td>
         <td>${fmt.usd(r.val)}</td>
@@ -383,10 +387,10 @@ function renderPortfolio() {
         <td>${pctSpan(r.plPct)}</td>
         <td class="${fmt.cls(r.day)}">${fmt.usd(r.day)}</td>
         <td>${w == null ? '—' : w.toFixed(1) + '%'}<span class="share"><i style="width:${w || 0}%"></i></span></td>
-        <td>${r.p.rx ? '<span class="na mono" style="font-size:10px">Synced</span>' : `<button class="btn ghost small" type="button" data-action="edit-position" data-id="${esc(r.p.id)}">Edit</button>`}</td>
+        <td>${r.p.rx || r.p.rv ? `<span class="na mono" style="font-size:10px">${r.p.rx ? 'Synced' : 'Imported'}</span>` : `<button class="btn ghost small" type="button" data-action="edit-position" data-id="${esc(r.p.id)}">Edit</button>`}</td>
       </tr>`;
     }).join('')}${pt.cash ? `<tr class="total"><td><div class="sym">Cash</div><div class="nm">Revolut X ${esc(rxCashLabel())}</div></td><td></td><td></td><td></td><td></td><td>${fmt.usd(pt.cash)}</td><td></td><td></td><td></td><td>${(pt.cash / pt.value * 100).toFixed(1)}%<span class="share"><i style="width:${pt.cash / pt.value * 100}%"></i></span></td><td></td></tr>` : ''}</tbody></table>
-    ${port.some(p => p.partial) ? '<p class="mono" style="font-size:10.5px;margin-top:10px">* Average cost only covers coins bought in the trade history loaded (Data tab → Reload trade history). Hover the cost for details.</p>' : ''}`;
+    ${port.some(p => p.partial) ? '<p class="mono" style="font-size:10.5px;margin-top:10px">* Average cost is incomplete: some units came from before the loaded history, without a price, or in a currency not yet converted. Hover the cost for details.</p>' : ''}`;
 
   const parts = rows.filter(r => r.val > 0);
   if (pt.cash) parts.push({ p: { symbol: 'CASH' }, val: pt.cash });
@@ -508,7 +512,7 @@ const candleCache = new Map();
 function tvSrc(sym, iv) {
   const p = new URLSearchParams({
     frameElementId: 'tv_' + sym, symbol: asset(sym).tv, interval: iv, hidesidetoolbar: '1', hidetoptoolbar: '0',
-    theme: 'dark', style: '1', locale: 'en', toolbar_bg: '#000000', enable_publishing: 'false', allow_symbol_change: 'false',
+    theme: KraftTheme.isLight() ? 'light' : 'dark', style: '1', locale: 'en', toolbar_bg: KraftTheme.color('bg'), enable_publishing: 'false', allow_symbol_change: 'false',
     timezone: 'Europe/London', studies: 'RSI@tv-basicstudies\u001fMACD@tv-basicstudies',
   });
   return 'https://s.tradingview.com/widgetembed/?' + p;
@@ -526,23 +530,33 @@ function renderCharts() {
   if (document.activeElement !== sel) sel.innerHTML = syms.map(s => `<option value="${esc(s)}"${s === chSym ? ' selected' : ''}>${esc(s)}</option>`).join('');
   $$('#ch-tf button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tf === chTf)));
   $$('#ch-tool button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tool === chTool)));
-  $('#ch-overlays').hidden = !rxConnected();
+  $('#ch-overlays').hidden = !rxConnected() && !rvAllTrades().length;
+  $$('.ch-sym-label').forEach(el => { el.textContent = chSym; });
+  const nt = $('#ch-notes');
+  if (document.activeElement !== nt) { nt.value = State.data.watchlistNotes[chSym] || ''; nt.dataset.sym = chSym; }
   $$('#ch-overlays button').forEach(b => b.setAttribute('aria-pressed', String(chOv[b.dataset.ov])));
   $('#ch-title').textContent = chSym;
   $('#ch-name').textContent = asset(chSym).name;
   $('#ch-dsym').textContent = chSym;
   $('#ch-hint').textContent = chTool === 'fib' ? 'Click the swing start, then the swing end · Esc cancels'
-    : chTool === 'hline' ? 'Click a price to place a level' : 'Click a drawing to select it · F fib · H level';
+    : chTool === 'hline' ? 'Click a price to place a level' : chTool === 'note' ? 'Click where the note should be pinned'
+    : 'Double-click a drawing to comment on it · F fib · H level · N note';
   if (!chCtl) {
     if (!window.KraftChart) { $('#ch-msg').textContent = 'Chart library failed to load'; return; }
     chCtl = KraftChart.mount($('#ch-box'), {
-      onDraw: d => {
-        const list = State.data.drawings[chSym] ||= [];
-        list.push({ id: uid(), created: new Date().toISOString(), ...d });
-        State.save(); chSelected = null; chTool = 'cursor';
-        chCtl.setTool(chTool); chCtl.setDrawings(list); renderCharts();
+      onDraw: (d, pt) => {
+        const add = extra => {
+          const list = State.data.drawings[chSym] ||= [];
+          const item = { id: uid(), created: new Date().toISOString(), ...d, ...extra };
+          list.push(item);
+          State.save(); chSelected = item.id; chTool = 'cursor';
+          chCtl.setTool(chTool); chCtl.setDrawings(list); renderCharts();
+        };
+        if (d.type === 'note') notePop(pt, '', { title: 'New note', onSave: text => text && add({ text }) });
+        else add({});
       },
       onSelect: d => { chSelected = d?.id || null; renderDrawingList(); },
+      onEdit: (d, pt) => editDrawingNote(d, pt),
     });
   }
   chCtl.setTool(chTool);
@@ -592,27 +606,85 @@ function chartOverlays() {
     }
     if (chOv.orders) for (const o of (RX.live?.orders || []).filter(o => pairBase(o.symbol) === base)) {
       const px = +(o.price || o.trigger || 0);
-      if (px > 0) lines.push({ price: px, dashed: true, color: o.side === 'buy' ? '#39FF14' : '#dfe2e5', title: `${o.side.toUpperCase()} ${(+o.quantity || 0).toString()}` });
+      if (px > 0) lines.push({ price: px, dashed: true, color: o.side === 'buy' ? 'up' : 'down', title: `${o.side.toUpperCase()} ${(+o.quantity || 0).toString()}` });
     }
     const pos = rxPositions().find(p => p.symbol === base);
-    if (chOv.cost && pos && isNum(pos.avgCost)) lines.push({ price: pos.avgCost, color: '#a7acb2', title: 'Avg cost' + (pos.partial ? '*' : '') });
+    if (chOv.cost && pos && isNum(pos.avgCost)) lines.push({ price: pos.avgCost, color: 'body', title: 'RX avg cost' + (pos.partial ? '*' : '') });
   }
-  for (const p of State.data.portfolio.filter(p => p.symbol === chSym)) lines.push({ price: p.avgCost, color: '#80858b', dashed: true, title: 'Manual cost' });
+  if (chOv.fills) for (const t of rvAllTrades().filter(t => t.symbol === chSym && (t.side === 'buy' || t.side === 'sell') && t.price != null)) {
+    const px = rvUsd(t.price, t.ccy);
+    marks.push({ time: Math.floor(t.t / 1000), side: t.side, text: `${t.side === 'buy' ? 'B' : 'S'} ${px == null ? t.ccy + ' ' + t.price : fmt.price(px)}` });
+  }
+  const rvp = rvPositions().find(p => p.symbol === chSym);
+  if (chOv.cost && rvp && isNum(rvp.avgCost)) lines.push({ price: rvp.avgCost, color: 'body', title: 'Revolut avg cost' + (rvp.partial ? '*' : '') });
+  for (const p of State.data.portfolio.filter(p => p.symbol === chSym)) lines.push({ price: p.avgCost, color: 'label', dashed: true, title: 'Manual cost' });
   chCtl.setOverlays({ marks, lines });
 }
 function chartTick() { if (chMode === 'kraft' && chCtl && chSym) loadChart(); }
 function renderDrawingList() {
   const list = State.data.drawings[chSym] || [];
   chCtl?.select(chSelected);
-  $('#ch-drawings').innerHTML = list.length ? `<table class="data"><thead><tr><th>Drawing</th><th>From</th><th>To</th><th>0.5</th><th>0.618</th><th>Added</th><th></th></tr></thead><tbody>${
+  if (document.activeElement?.matches?.('#ch-drawings input')) return; // don't rebuild under someone typing
+  const day = t => new Date(t * 1000).toISOString().slice(0, 10);
+  $('#ch-drawings').innerHTML = list.length ? `<table class="data"><thead><tr><th>Drawing</th><th>Details</th><th>Comment</th><th>Added</th><th></th></tr></thead><tbody>${
     list.map(d => {
       const sel = d.id === chSelected ? ' style="outline:1px solid var(--green)"' : '';
-      if (d.type === 'hline') return `<tr${sel}><td><span class="sym">Level</span></td><td>${fmt.price(d.price)}</td><td></td><td></td><td></td><td>${fmt.date(d.created)}</td><td><button class="linkbtn rm" type="button" data-action="del-drawing" data-id="${esc(d.id)}">Delete</button></td></tr>`;
       const lv = l => d.p2 + (d.p1 - d.p2) * l;
-      return `<tr${sel}><td><span class="sym">Fib</span> <span class="nm">${new Date(d.t1 * 1000).toISOString().slice(0, 10)} → ${new Date(d.t2 * 1000).toISOString().slice(0, 10)}</span></td>
-        <td>${fmt.price(d.p1)}</td><td>${fmt.price(d.p2)}</td><td>${fmt.price(lv(0.5))}</td><td class="up">${fmt.price(lv(0.618))}</td><td>${fmt.date(d.created)}</td>
+      const kind = d.type === 'fib' ? 'Fib' : d.type === 'hline' ? 'Level' : 'Note';
+      const details = d.type === 'fib' ? `${day(d.t1)} ${fmt.price(d.p1)} → ${day(d.t2)} ${fmt.price(d.p2)} · 0.618 <span class="up">${fmt.price(lv(0.618))}</span>`
+        : d.type === 'hline' ? fmt.price(d.price) : `${day(d.t)} · ${fmt.price(d.p)}`;
+      const val = d.type === 'note' ? d.text || '' : d.note || '';
+      return `<tr${sel}><td><button class="linkbtn" type="button" data-action="sel-drawing" data-id="${esc(d.id)}">${kind}</button></td>
+        <td style="white-space:normal;text-align:left">${details}</td>
+        <td><label class="visually-hidden" for="dn-${esc(d.id)}">Comment</label><input class="inline-note" id="dn-${esc(d.id)}" data-dnote="${esc(d.id)}" maxlength="500" value="${esc(val)}" placeholder="${d.type === 'note' ? 'Note text' : 'Add a comment'}"></td>
+        <td>${fmt.date(d.created)}</td>
         <td><button class="linkbtn rm" type="button" data-action="del-drawing" data-id="${esc(d.id)}">Delete</button></td></tr>`;
-    }).join('')}</tbody></table>` : '<div class="empty">No drawings yet. Choose Fib or Level above, then click on the chart.</div>';
+    }).join('')}</tbody></table>` : '<div class="empty">No drawings yet. Choose Fib, Level or Note above, then click on the chart.</div>';
+}
+// Small editor pinned on the chart, for notes and comments on drawings.
+function closePop() { $('#ch-box .chart-pop')?.remove(); }
+function notePop(pt, initial, { title, onSave, onDelete }) {
+  closePop();
+  const box = $('#ch-box');
+  const el = document.createElement('div');
+  el.className = 'chart-pop';
+  el.innerHTML = `<div class="row"><span class="mono">${esc(title)}</span><span class="mono">Enter saves · Esc cancels</span></div>
+    <textarea maxlength="500" aria-label="${esc(title)}">${esc(initial)}</textarea>
+    <div class="row">${onDelete ? '<button class="linkbtn rm" type="button" data-pop="del">Delete</button>' : '<span></span>'}
+      <span><button class="btn ghost small" type="button" data-pop="cancel">Cancel</button> <button class="btn small" type="button" data-pop="save">Save</button></span></div>`;
+  el.style.left = Math.max(4, Math.min((pt?.x ?? 40) + 12, box.clientWidth - 292)) + 'px';
+  el.style.top = Math.max(4, Math.min((pt?.y ?? 40) + 12, box.clientHeight - 170)) + 'px';
+  box.appendChild(el);
+  const ta = $('textarea', el);
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  const save = () => { const v = ta.value.trim(); closePop(); onSave(v); };
+  el.addEventListener('click', e => {
+    const a = e.target.closest('[data-pop]')?.dataset.pop;
+    if (a === 'save') save(); else if (a === 'cancel') closePop(); else if (a === 'del') { closePop(); onDelete(); }
+  });
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePop(); }
+  });
+}
+function setDrawingText(id, text) {
+  const d = (State.data.drawings[chSym] || []).find(x => x.id === id);
+  if (!d) return;
+  if (d.type === 'note') { if (text) d.text = text; } else if (text) d.note = text; else delete d.note;
+  State.save(); chCtl?.setDrawings(State.data.drawings[chSym]);
+}
+function deleteDrawing(id) {
+  State.data.drawings[chSym] = (State.data.drawings[chSym] || []).filter(x => x.id !== id);
+  if (!State.data.drawings[chSym].length) delete State.data.drawings[chSym];
+  State.save(); chSelected = null; chCtl?.setDrawings(State.data.drawings[chSym] || []); renderDrawingList();
+}
+function editDrawingNote(d, pt) {
+  const isNote = d.type === 'note';
+  notePop(pt || chCtl.pointOf(d), isNote ? d.text || '' : d.note || '', {
+    title: isNote ? 'Edit note' : `Comment on ${d.type === 'fib' ? 'fib' : 'level ' + fmt.price(d.price)}`,
+    onSave: text => { setDrawingText(d.id, text); renderDrawingList(); },
+    onDelete: isNote ? () => deleteDrawing(d.id) : null,
+  });
 }
 function renderTvGrid() {
   const syms = State.data.chartSymbols;
@@ -755,7 +827,7 @@ function snapshotModal(preset = null) {
     <form id="snap-form" class="m-body" style="padding:0">
       <div class="f"><span class="mono" style="font-size:10.5px">Assets</span>
         <div class="picklist">${syms.map(s => `<label><input type="checkbox" name="snap" value="${esc(s)}"${preset?.symbol === s ? ' checked' : ''}> ${esc(s)} <span class="px">${preset?.symbol === s ? `${preset.side} fill ${fmt.price(preset.price)}` : fmt.price(Q[s]?.price)}</span></label>`).join('')}</div></div>
-      <label class="f"><span>Thesis</span><textarea id="snap-thesis" required maxlength="4000" placeholder="What you expect, why, and what would prove you wrong">${preset ? esc(`${preset.side === 'buy' ? 'Bought' : 'Sold'} ${preset.qty} ${preset.symbol} at ${fmt.price(preset.price)} on Revolut X (${fmt.date(preset.time)}). Why: `) : ''}</textarea></label>
+      <label class="f"><span>Thesis</span><textarea id="snap-thesis" required maxlength="4000" placeholder="What you expect, why, and what would prove you wrong">${preset ? esc(`${preset.side === 'buy' ? 'Bought' : 'Sold'} ${preset.qty} ${preset.symbol} at ${fmt.price(preset.price)} on ${preset.src || 'Revolut X'} (${fmt.date(preset.time)}). Why: `) : ''}</textarea></label>
       <label class="f"><span>Tags, comma separated</span><input id="snap-tags" maxlength="200" placeholder="bullish, earnings, macro"></label>
       <div class="m-foot"><button class="btn ghost" type="button" data-action="close-modal">Cancel</button><button class="btn" type="submit">Save snapshot</button></div>
     </form>`);
@@ -771,7 +843,7 @@ function snapshotModal(preset = null) {
     State.data.journal.push({
       id: uid(), date: preset ? new Date(preset.time).toISOString() : new Date().toISOString(),
       assets: picked.map(s => ({ symbol: s, price: preset?.symbol === s ? preset.price : Q[s]?.price ?? null })), thesis,
-      tags: preset && !tags.includes('revolut-x') ? [...tags, 'revolut-x'] : tags, ...(preset ? { tradeId: preset.id } : {}),
+      tags: preset ? [...new Set([...tags, preset.src === 'Revolut' ? 'revolut' : 'revolut-x'])] : tags, ...(preset ? { tradeId: preset.id } : {}),
     });
     State.save(); closeModal(); render();
   });
@@ -786,8 +858,11 @@ const SOURCE_INFO = {
 };
 function renderData() {
   renderRxData();
+  renderRvImported();
+  renderTheme();
   const d = State.data;
-  $('#dt-counts').textContent = `${d.portfolio.length} positions, ${d.watchlist.length} watchlist tickers, ${d.alerts.length} alerts, ${d.journal.length} journal entries, ${Object.values(d.watchlistNotes).filter(Boolean).length} notes.`;
+  const nDraw = Object.values(d.drawings).reduce((a, l) => a + l.length, 0);
+  $('#dt-counts').textContent = `${d.portfolio.length} manual positions, ${d.watchlist.length} watchlist tickers, ${d.alerts.length} alerts, ${d.journal.length} journal entries, ${Object.values(d.watchlistNotes).filter(Boolean).length} notes, ${nDraw} chart drawings, ${Object.keys(d.revolut).length} Revolut imports, ${Object.keys(d.theme.presets).length} colour presets. Revolut X keys and tokens are never included.`;
   const r = LastResp;
   $('#dt-when').textContent = r ? 'Last response ' + fmt.ago(r.updatedAt) : 'No response yet';
   $('#dt-sources').innerHTML = `<thead><tr><th>Source</th><th>Used for</th><th>OK</th><th>Failed</th><th>State</th></tr></thead><tbody>${
@@ -820,7 +895,8 @@ async function importData(file) {
     const n = `${(d.portfolio || []).length} positions, ${(d.journal || []).length} journal entries, ${(d.alerts || []).length} alerts`;
     if (!confirm(`Replace the data in this browser with the backup (${n})?`)) return;
     localStorage.setItem(STORE_KEY, JSON.stringify(d));
-    State.load(); chartsKey = '';
+    State.load(); chartsKey = ''; rvCache.key = '';
+    KraftTheme.apply(State.data.theme.colors || KraftTheme.PRESETS[State.data.theme.active] || KraftTheme.PRESETS.KRAFT);
     toast('Imported ' + n);
     render(); fetchQuotes();
   } catch (e) { toast('Import failed: ' + e.message, true); }
@@ -967,24 +1043,139 @@ function renderRxOrders() {
         <td>${esc(o.quantity || o.amount || '')}</td><td>${fmt.price(px)}</td><td>${fmt.price(now)}</td><td>${fmt.pct(dist, 1)}</td><td>${o.created ? fmt.date(o.created) : '—'}</td></tr>`;
     }).join('')}</tbody></table>` : '<div class="empty">No open orders.</div>';
 }
+function tradeLog() {
+  const rows = (RX.history?.orders || []).map(o => ({
+    id: o.id, t: o.updated || o.created, symbol: pairBase(o.symbol), label: o.symbol, side: o.side,
+    qty: +o.filled_quantity, price: +o.average_fill_price, src: 'Revolut X',
+  }));
+  for (const t of rvAllTrades()) if ((t.side === 'buy' || t.side === 'sell') && t.price != null) rows.push({
+    id: t.id, t: t.t, symbol: t.symbol, label: t.symbol, side: t.side, qty: t.qty, price: rvUsd(t.price, t.ccy), rawPrice: t.price, ccy: t.ccy, src: 'Revolut',
+  });
+  return rows.sort((a, b) => b.t - a.t);
+}
 function renderRxTrades() {
   const wrap = $('#jn-rx');
-  const orders = [...(RX.history?.orders || [])].reverse();
-  wrap.hidden = !RX.history;
-  if (!RX.history) return;
-  $('#jn-rx-sum').textContent = `${orders.length} filled orders since ${RX.history.from ? new Date(RX.history.from).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '—'}`;
+  const rows = tradeLog();
+  wrap.hidden = !rows.length;
+  if (!rows.length) return;
+  const srcs = [...new Set(rows.map(r => r.src))].join(' + ');
+  $('#jn-rx-sum').textContent = `${rows.length} trades · ${srcs}`;
   const linked = new Set(State.data.journal.map(e => e.tradeId).filter(Boolean));
-  $('#jn-rx-trades').innerHTML = orders.length ? `<table class="data"><thead><tr><th>Date</th><th>Pair</th><th>Side</th><th>Quantity</th><th>Fill price</th><th>Now</th><th>Move since</th><th></th></tr></thead><tbody>${
-    orders.slice(0, 150).map(o => {
-      const base = pairBase(o.symbol), now = Q[base]?.price ?? rxTickerPrice(base), px = +o.average_fill_price;
+  $('#jn-rx-trades').innerHTML = `<table class="data"><thead><tr><th>Date</th><th>Asset</th><th>Side</th><th>Quantity</th><th>Price</th><th>Now</th><th>Move since</th><th>Source</th><th></th></tr></thead><tbody>${
+    rows.slice(0, 200).map(o => {
+      const now = Q[o.symbol]?.price ?? rxTickerPrice(o.symbol), px = o.price;
       const mv = isNum(now) && px ? (now - px) / px * 100 : null;
       // for a buy, up is good; for a sell, down is good: colour by outcome of the decision
       const good = mv == null ? null : o.side === 'buy' ? mv : -mv;
-      return `<tr><td><span class="nm">${fmt.date(o.updated || o.created)}</span></td><td><span class="sym">${esc(o.symbol)}</span></td>
-        <td class="${o.side === 'buy' ? 'up' : 'down'}">${esc(o.side)}</td><td>${esc(o.filled_quantity)}</td><td>${fmt.price(px)}</td><td>${fmt.price(now)}</td>
+      return `<tr><td><span class="nm">${fmt.date(o.t)}</span></td><td><span class="sym">${esc(o.label)}</span></td>
+        <td class="${o.side === 'buy' ? 'up' : 'down'}">${esc(o.side)}</td><td>${+(+o.qty).toPrecision(8)}</td>
+        <td>${px == null ? esc(`${o.ccy} ${o.rawPrice}`) : fmt.price(px)}</td><td>${fmt.price(now)}</td>
         <td class="${fmt.cls(good)}" title="Coloured by whether the ${o.side} has paid off">${fmt.pct(mv)}</td>
+        <td><span class="na mono" style="font-size:10px">${o.src}</span></td>
         <td>${linked.has(o.id) ? '<span class="na mono" style="font-size:10px">In journal</span>' : `<button class="linkbtn" type="button" data-action="trade-thesis" data-id="${esc(o.id)}">Add thesis</button>`}</td></tr>`;
-    }).join('')}</tbody></table>` : '<div class="empty">No filled orders in the loaded period.</div>';
+    }).join('')}</tbody></table>`;
+}
+
+// ── Revolut app statements (stocks & crypto CSV) ──────────────────────────
+let FX = (() => { try { return JSON.parse(localStorage.getItem('kraft_terminal_fx') || '{}'); } catch { return {}; } })();
+const rvTrades = kind => State.data.revolut?.[kind]?.trades || [];
+const rvAllTrades = () => [...rvTrades('stock'), ...rvTrades('crypto')];
+const rvUsd = (v, ccy) => v == null ? null : ['USD', 'USDC', 'USDT'].includes(ccy) ? v : FX[ccy] ? v * FX[ccy] : null;
+const rvNeedsFx = () => rvAllTrades().some(t => t.ccy && !['USD', 'USDC', 'USDT'].includes(t.ccy));
+let rvCache = { key: '', list: [] };
+function rvPositions() {
+  const key = `${(State.data.revolut.stock?.importedAt || '')}|${(State.data.revolut.crypto?.importedAt || '')}|${JSON.stringify(FX)}`;
+  if (rvCache.key === key) return rvCache.list;
+  const list = [];
+  for (const kind of ['stock', 'crypto']) for (const p of KraftStatements.positions(rvTrades(kind), FX)) list.push({
+    id: `rv:${kind}:${p.symbol}`, rv: true, kind, symbol: p.symbol, shares: p.qty, avgCost: p.avgCost, partial: p.partial,
+    costNote: p.notes.join('; ') || 'From your Revolut statement', notes: kind === 'stock' ? 'Revolut stocks' : 'Revolut crypto',
+  });
+  rvCache = { key, list };
+  return list;
+}
+function rvRegister(kind, trades) {
+  if (kind !== 'crypto') return;
+  for (const sym of new Set(trades.map(t => t.symbol))) {
+    if (ASSETS.find(a => a.sym === sym) || State.data.custom[sym]?.kind === 'crypto') continue;
+    State.data.custom[sym] = { kind: 'crypto', pair: `${sym}-USD`, name: sym };
+  }
+}
+let rvPending = null;
+async function rvChoose(file) {
+  const msg = $('#rv-msg');
+  try {
+    const text = await file.text();
+    const r = KraftStatements.parse(text, file.name);
+    // Non-USD prices need today's rate before the preview can show costs.
+    if (r.ccys.some(c => !['USD', 'USDC', 'USDT'].includes(c)) && !Object.keys(FX).length) {
+      msg.textContent = 'Fetching today\u2019s exchange rate…';
+      const d = await fetch('/api/quotes?fx=1', { signal: AbortSignal.timeout(15_000) }).then(x => x.json()).catch(() => ({}));
+      if (d.fx && Object.keys(d.fx).length) { FX = d.fx; try { localStorage.setItem('kraft_terminal_fx', JSON.stringify(FX)); } catch { /* ignore */ } }
+      msg.textContent = '';
+    }
+    rvPending = { file: file.name, ...r };
+    rvPreview();
+  } catch (e) { msg.textContent = 'Import failed: ' + e.message; toast('Import failed: ' + e.message, true); }
+}
+function rvPreview() {
+  const r = rvPending;
+  const pos = KraftStatements.positions(r.trades, FX);
+  const ign = Object.entries(r.ignored);
+  const nonUsd = r.ccys.filter(c => !['USD', 'USDC', 'USDT'].includes(c));
+  openModal('Import Revolut statement', `
+    <p style="font-size:13.5px"><b>${esc(r.file)}</b>: ${r.rows} rows, ${r.trades.length} trades used. Columns: <span class="mono" style="font-size:10.5px;text-transform:none">${esc(r.header.join(', '))}</span></p>
+    <label class="f"><span>This statement is for</span><select id="rv-kind"><option value="stock"${r.kind === 'stock' ? ' selected' : ''}>Stocks &amp; ETFs</option><option value="crypto"${r.kind === 'crypto' ? ' selected' : ''}>Crypto</option></select></label>
+    ${nonUsd.length ? `<p style="font-size:13px">Prices are in ${esc(nonUsd.join(', '))}. They're converted to USD at today's rate${Object.keys(FX).length ? ` (${Object.entries(FX).map(([k, v]) => `1 ${k} = $${v.toFixed(4)}`).join(', ')})` : ' once it loads'}, so average costs are approximate.</p>` : ''}
+    <div class="table-wrap"><table class="data"><thead><tr><th>Holding</th><th>Units</th><th>Avg cost</th><th>Notes</th></tr></thead><tbody>${
+      pos.map(p => `<tr><td><span class="sym">${esc(p.symbol)}</span></td><td>${+p.qty.toPrecision(8)}</td><td>${fmt.price(p.avgCost)}</td><td class="wrap-cell">${esc(p.notes.join('; '))}</td></tr>`).join('') || '<tr><td colspan="4">No open holdings (everything was sold)</td></tr>'
+    }</tbody></table></div>
+    ${ign.length ? `<p class="mono" style="font-size:10.5px">Not position changes, skipped: ${esc(ign.map(([k, v]) => `${k} ×${v}`).join(', '))}</p>` : ''}
+    ${r.warnings.length ? `<p class="mono" style="font-size:10.5px">${esc(r.warnings.slice(0, 5).join(' · '))}${r.warnings.length > 5 ? ` · and ${r.warnings.length - 5} more` : ''}</p>` : ''}
+    <div class="m-foot"><button class="btn ghost" type="button" data-action="close-modal">Cancel</button><button class="btn" type="button" data-action="rv-confirm">Import</button></div>`);
+}
+function rvConfirm() {
+  const r = rvPending;
+  if (!r) return;
+  const kind = $('#rv-kind')?.value === 'stock' ? 'stock' : 'crypto';
+  const replacing = !!State.data.revolut[kind];
+  State.data.revolut[kind] = { file: r.file, importedAt: new Date().toISOString(), rows: r.rows, trades: r.trades.map(t => ({ ...t, id: `rv-${kind}-${t.id}` })), ignored: r.ignored };
+  rvRegister(kind, r.trades);
+  rvPending = null; rvCache.key = '';
+  State.save(); closeModal();
+  $('#rv-msg').innerHTML = `<span class="up">${replacing ? 'Replaced' : 'Imported'} ${kind === 'stock' ? 'stocks' : 'crypto'}: ${r.trades.length} trades.</span>`;
+  toast(`Revolut ${kind === 'stock' ? 'stocks' : 'crypto'} imported`);
+  fetchQuotes(); render();
+}
+function renderRvImported() {
+  const rv = State.data.revolut;
+  const items = ['stock', 'crypto'].filter(k => rv[k]);
+  $('#rv-imported').innerHTML = items.length ? `<ul class="rv-list">${items.map(k => {
+    const n = rvPositions().filter(p => p.kind === k).length;
+    return `<li><span><b>${k === 'stock' ? 'Stocks' : 'Crypto'}</b> · ${esc(rv[k].file)}<br><span class="mono" style="font-size:10.5px">${rv[k].trades.length} trades · ${n} holdings · imported ${fmt.date(rv[k].importedAt)}</span></span>
+      <button class="linkbtn rm" type="button" data-action="rv-remove" data-kind="${k}">Remove</button></li>`;
+  }).join('')}</ul>` : '<p class="empty" style="padding:0">Nothing imported yet.</p>';
+}
+
+// ── appearance ────────────────────────────────────────────────────────────
+function themeColors() { return KraftTheme.get(); }
+function renderTheme() {
+  const th = State.data.theme, cur = themeColors();
+  $('#th-active').textContent = 'Active: ' + (th.active || 'KRAFT');
+  if (!document.activeElement?.matches?.('#th-swatches input')) {
+    $('#th-swatches').innerHTML = KraftTheme.KEYS.map(([k, , label]) => `<label class="swatch"><input type="color" data-th="${k}" value="${cur[k]}"><span>${label}<small>${cur[k]}</small></span></label>`).join('');
+  }
+  const all = [...Object.entries(KraftTheme.PRESETS).map(([n, c]) => ({ n, c, builtIn: true })), ...Object.entries(th.presets).map(([n, c]) => ({ n, c }))];
+  $('#th-presets').innerHTML = all.map(({ n, c, builtIn }) => `<li>
+    <span class="chips-row">${['bg', 'accent', 'up', 'down', 'text'].map(k => `<i style="background:${c[k]}"></i>`).join('')}</span>
+    <span class="nm">${esc(n)}${builtIn ? '<span class="mono">built-in</span>' : ''}${th.active === n ? '<span class="mono up">active</span>' : ''}</span>
+    <span class="acts"><button class="linkbtn" type="button" data-action="th-apply" data-name="${esc(n)}">Apply</button>${builtIn ? '' : `<button class="linkbtn rm" type="button" data-action="th-delete" data-name="${esc(n)}">Delete</button>`}</span></li>`).join('');
+}
+function setTheme(colors, active) {
+  KraftTheme.apply(colors);
+  State.data.theme.colors = KraftTheme.get();
+  State.data.theme.active = active;
+  State.save();
 }
 
 // ── modal & tooltip ───────────────────────────────────────────────────────
@@ -1023,12 +1214,13 @@ document.addEventListener('mousemove', e => {
 
 // ── events ────────────────────────────────────────────────────────────────
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-action], [data-tab], [data-period], [data-iv], [data-group], [data-tag], [data-tf], [data-tool], [data-mode], [data-ov]');
+  const t = e.target.closest('[data-action], [data-tab], [data-period], [data-iv], [data-group], [data-tag], [data-tf], [data-tool], [data-mode], [data-ov], [data-goto]');
   if (!t) return;
   if (t.dataset.tab && t.getAttribute('role') === 'tab') return setTab(t.dataset.tab);
   if (t.dataset.period) { hmPeriod = t.dataset.period; $$('#hm-period button').forEach(b => b.setAttribute('aria-pressed', String(b === t))); return renderHeatmap(); }
   if (t.dataset.iv) { chartIv = t.dataset.iv; $$('#ch-interval button').forEach(b => b.setAttribute('aria-pressed', String(b === t))); return renderCharts(); }
-  if (t.dataset.tf) { chTf = t.dataset.tf; return renderCharts(); }
+  if (t.dataset.goto) { $('#' + t.dataset.goto)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  if (t.dataset.tf) { chTf = t.dataset.tf; closePop(); return renderCharts(); }
   if (t.dataset.tool) { chTool = t.dataset.tool; chCtl?.setTool(chTool); return renderCharts(); }
   if (t.dataset.mode) { chMode = t.dataset.mode; chartsKey = ''; return renderCharts(); }
   if (t.dataset.ov) { chOv[t.dataset.ov] = !chOv[t.dataset.ov]; renderCharts(); return chartOverlays(); }
@@ -1075,10 +1267,20 @@ document.addEventListener('click', e => {
       if (!confirm('Delete this snapshot?')) return;
       d.journal = d.journal.filter(x => x.id !== id); State.save(); return render();
     case 'export': return exportData();
-    case 'del-drawing':
-      d.drawings[chSym] = (d.drawings[chSym] || []).filter(x => x.id !== id);
-      if (!d.drawings[chSym].length) delete d.drawings[chSym];
-      State.save(); chSelected = null; chCtl?.setDrawings(d.drawings[chSym] || []); return renderDrawingList();
+    case 'del-drawing': return deleteDrawing(id);
+    case 'sel-drawing': chSelected = id; return renderDrawingList();
+    case 'rv-confirm': return rvConfirm();
+    case 'rv-remove':
+      if (!confirm(`Remove the imported Revolut ${t.dataset.kind === 'stock' ? 'stocks' : 'crypto'} statement?`)) return;
+      delete d.revolut[t.dataset.kind]; rvCache.key = ''; State.save(); return render();
+    case 'th-apply': {
+      const n = t.dataset.name, c = KraftTheme.PRESETS[n] || d.theme.presets[n];
+      if (c) { setTheme(c, n); toast(`Theme: ${n}`); }
+      return;
+    }
+    case 'th-delete':
+      if (!confirm(`Delete the "${t.dataset.name}" preset?`)) return;
+      delete d.theme.presets[t.dataset.name]; State.save(); return renderTheme();
     case 'clear-drawings':
       if (!(d.drawings[chSym] || []).length || !confirm(`Delete all drawings on ${chSym}?`)) return;
       delete d.drawings[chSym]; State.save(); chCtl?.setDrawings([]); return renderDrawingList();
@@ -1088,13 +1290,13 @@ document.addEventListener('click', e => {
       try { localStorage.removeItem(RX_TOKEN_KEY); localStorage.removeItem(RX_CACHE_KEY); } catch { /* ignore */ }
       Object.assign(RX, { live: null, history: null, mode: null, err: null }); toast('Revolut X data and token removed from this browser'); return render();
     case 'trade-thesis': {
-      const o = (RX.history?.orders || []).find(x => x.id === id);
-      if (o) snapshotModal({ id: o.id, symbol: pairBase(o.symbol), side: o.side, qty: o.filled_quantity, price: +o.average_fill_price, time: o.updated || o.created });
+      const o = tradeLog().find(x => x.id === id);
+      if (o) snapshotModal({ id: o.id, symbol: o.symbol, side: o.side, qty: +(+o.qty).toPrecision(8), price: o.price ?? o.rawPrice, time: o.t, src: o.src });
       return;
     }
     case 'reset':
-      if (!confirm('Erase all positions, alerts, journal entries and notes in this browser? Export a backup first if unsure.')) return;
-      localStorage.removeItem(STORE_KEY); State.load(); chartsKey = ''; render(); return fetchQuotes();
+      if (!confirm('Erase all positions, alerts, journal entries, notes, drawings, imports and colour presets in this browser? Export a backup first if unsure.')) return;
+      localStorage.removeItem(STORE_KEY); State.load(); KraftTheme.apply(KraftTheme.PRESETS.KRAFT); rvCache.key = ''; chartsKey = ''; render(); return fetchQuotes();
     case 'close-modal': return closeModal();
   }
 });
@@ -1102,13 +1304,10 @@ document.addEventListener('keydown', e => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.mover[data-action]')) { e.preventDefault(); e.target.click(); }
   if (tab !== 'charts' || chMode !== 'kraft' || e.target.matches('input, textarea, select') || $('#modal').open) return;
   const k = e.key.toLowerCase();
-  if (k === 'escape') { chTool = 'cursor'; chSelected = null; chCtl?.setTool('cursor'); renderCharts(); }
-  else if (k === 'f' || k === 'h') { chTool = k === 'f' ? 'fib' : 'hline'; chCtl?.setTool(chTool); renderCharts(); }
-  else if ((k === 'delete' || k === 'backspace') && chSelected) {
-    e.preventDefault();
-    State.data.drawings[chSym] = (State.data.drawings[chSym] || []).filter(x => x.id !== chSelected);
-    State.save(); chSelected = null; chCtl?.setDrawings(State.data.drawings[chSym]); renderDrawingList();
-  }
+  if (k === 'escape') { closePop(); chTool = 'cursor'; chSelected = null; chCtl?.setTool('cursor'); renderCharts(); }
+  else if (k === 'f' || k === 'h' || k === 'n') { chTool = { f: 'fib', h: 'hline', n: 'note' }[k]; chCtl?.setTool(chTool); renderCharts(); }
+  else if (k === 'enter' && chSelected) { const dd = (State.data.drawings[chSym] || []).find(x => x.id === chSelected); if (dd) { e.preventDefault(); editDrawingNote(dd); } }
+  else if ((k === 'delete' || k === 'backspace') && chSelected) { e.preventDefault(); deleteDrawing(chSelected); }
 });
 $('#modal').addEventListener('click', e => { if (e.target === $('#modal')) closeModal(); });
 document.addEventListener('focusout', e => {
@@ -1124,6 +1323,36 @@ document.addEventListener('change', e => {
   if (e.target.id === 'ch-sym') { chSym = e.target.value; chSelected = null; e.target.blur(); renderCharts(); }
   if (e.target.id === 'al-sym') updateAlertHint();
   if (e.target.id === 'import-file' && e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
+  if (e.target.id === 'rv-file' && e.target.files[0]) { rvChoose(e.target.files[0]); e.target.value = ''; }
+  if (e.target.matches('[data-dnote]')) { setDrawingText(e.target.dataset.dnote, e.target.value.trim()); }
+});
+let notesTimer = null;
+document.addEventListener('input', e => {
+  if (e.target.matches('[data-th]')) {
+    const c = { ...KraftTheme.get(), [e.target.dataset.th]: e.target.value };
+    e.target.nextElementSibling.querySelector('small').textContent = e.target.value;
+    setTheme(c, 'Custom (unsaved)');
+    $('#th-active').textContent = 'Active: Custom (unsaved)';
+  }
+  if (e.target.id === 'ch-notes') {
+    const sym = e.target.dataset.sym, v = e.target.value;
+    $('#ch-note-state').textContent = 'Saving…';
+    clearTimeout(notesTimer);
+    notesTimer = setTimeout(() => {
+      if (v.trim()) State.data.watchlistNotes[sym] = v; else delete State.data.watchlistNotes[sym];
+      State.save(); $('#ch-note-state').textContent = 'Saved · also shown on the watchlist card';
+    }, 400);
+  }
+});
+document.addEventListener('kraft-theme', () => { chartsKey = ''; if (tab !== 'data') render(); else { renderHeatmap?.(); renderTheme(); } });
+$('#th-save-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const n = $('#th-name').value.trim();
+  if (!n) return toast('Give the preset a name', true);
+  if (KraftTheme.PRESETS[n]) return toast('That name is taken by a built-in preset', true);
+  State.data.theme.presets[n] = KraftTheme.get();
+  State.data.theme.active = n; State.save();
+  $('#th-name').value = ''; toast(`Saved preset "${n}"`); renderTheme();
 });
 $('#rx-token-form').addEventListener('submit', e => {
   e.preventDefault();
@@ -1168,6 +1397,7 @@ document.addEventListener('visibilitychange', () => {
 
 // ── boot ──────────────────────────────────────────────────────────────────
 State.load();
+for (const k of ['stock', 'crypto']) if (State.data.revolut[k]) rvRegister(k, State.data.revolut[k].trades);
 rxLoad();
 const cachedAt = loadCache();
 const clock = () => { $('#st-clock').textContent = new Date().toLocaleTimeString('en-GB', { timeZone: 'UTC' }) + ' UTC'; };

@@ -1,6 +1,6 @@
 # KRAFT Terminal · terminal.elian.ink
 
-A tracker for crypto, crypto equities and AI stocks, with a portfolio, watchlist, charts with saved Fibonacci drawings, price alerts, a thesis journal, and your Revolut X account (holdings, cost basis, fills and open orders). It replaces the old CRYPTERM build.
+A tracker for crypto, crypto equities and AI stocks, with a portfolio, watchlist, charts with saved Fibonacci drawings and notes, price alerts, a thesis journal, your Revolut X account (live) and your Revolut app stocks and crypto (CSV statements), in colours you can set. It replaces the old CRYPTERM build.
 
 ```
  browser (public/)                     Netlify functions (netlify/functions/)
@@ -38,7 +38,9 @@ Other fixes:
 | `public/assets/terminal.css` | KRAFT styles (same palette and type as elian.ink) |
 | `public/assets/assets.js` | The asset list: symbols, groups, descriptions, TradingView symbols |
 | `public/assets/app.js` | All app logic |
-| `public/assets/chart.js` | Candle chart, Fibonacci/level drawings, Revolut X overlays |
+| `public/assets/chart.js` | Candle chart, Fibonacci / level / note drawings, account overlays |
+| `public/assets/theme.js` | Colour themes and built-in presets (loaded in `<head>`) |
+| `public/assets/statements.js` | Revolut app CSV statement parser and cost-basis maths |
 | `public/assets/vendor/` | TradingView Lightweight Charts 5.3 (Apache-2.0) |
 | `netlify/functions/quotes.mts` | Prices, served at `/api/quotes` |
 | `netlify/functions/candles.mts` | OHLC candles, served at `/api/candles` |
@@ -63,6 +65,16 @@ Read-only. Your balances, open orders and the last 12 months of filled orders ar
 | `TERMINAL_TOKEN` | a long random string; paste the same value into the site's Data tab once |
 
 The key pair lives in `kraft-site/_private-revolut-x/` on your Mac, outside every repo. Nothing from `/api/revx` is cached; without the token it answers 401. Average cost is computed from filled USD orders in the loaded history; if you held coins from before that, the cost shows with an asterisk.
+
+## Revolut app (stocks & crypto)
+
+Revolut has no API for app investments, so they come in as CSV statements: Revolut app → Invest → More → Documents → Stocks (or Crypto) → account statement → CSV. Import on **Settings → Revolut statements**; you see a preview (holdings, average cost, skipped rows) before anything is saved, and each import replaces the previous one of the same kind. Columns are matched by name; buys, sells, stock splits, dividends, rewards and transfers are understood, cash movements and fees are skipped. GBP/EUR prices are converted to USD at today's rate (from Revolut X's BTC books), so those costs are approximate.
+
+## Charts, notes and colours
+
+- **Drawings:** Fib (F), Level (H), Note (N). Double-click a drawing or select it and press Enter to comment on it; comments show on the chart. Delete/Backspace removes the selected drawing.
+- **Notes on a symbol:** the box under the chart, shared with the watchlist card.
+- **Colours:** Settings → Appearance. Ten colours, five built-in presets (KRAFT, Green / red, Amber, Ice, Paper), and your own saved presets. Included in backups.
 
 ## Your data
 

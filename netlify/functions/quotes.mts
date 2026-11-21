@@ -1,6 +1,6 @@
 // KRAFT Terminal — market data endpoint.
 //
-//   GET /api/quotes?stocks=COIN,MSTR,NVDA&crypto=bitcoin,hyperliquid&rx=SOL-USD,AAVE-USD
+//   GET /api/quotes?stocks=COIN,MSTR,NVDA&crypto=bitcoin,hyperliquid&rx=SOL-USD,AAVE-USD&fx=1
 //
 // Runs on Netlify's servers so the browser only ever talks to its own domain.
 // (Tested from Netlify: Yahoo Finance answers 429 and Stooq/Cboe 403 there, so they're not used.)
@@ -185,13 +185,25 @@ export default async (req: Request) => {
   const stocks = list(url.searchParams.get("stocks"), SYM_RE, true);
   const crypto = list(url.searchParams.get("crypto"), CG_RE, false);
   const rx = list(url.searchParams.get("rx"), RX_RE, true);
+  const wantFx = url.searchParams.get("fx") === "1";
 
   const quotes: Record<string, Quote> = {};
   const errors: Record<string, string> = {};
   const src = (k: string) => (sources[k] ||= { ok: 0, fail: 0 });
   const sources: Record<string, { ok: number; fail: number; note?: string }> = {};
 
-  const [cq, hist, cg, rq] = await Promise.all([
+  // GBP/EUR → USD, for converting costs in Revolut app statements. Derived from Revolut X's BTC books.
+  const fxP = wantFx
+    ? getJSON("https://revx.revolut.com/api/1.0/public/tickers?symbols=" + encodeURIComponent("BTC/USD,BTC/GBP,BTC/EUR"))
+        .then((d: any) => {
+          const px: Record<string, number> = {};
+          for (const t of d?.data || []) px[String(t.symbol).split("/")[1]] = num(t.mid) ?? num(t.last_price) ?? NaN;
+          const out: Record<string, number> = {};
+          for (const c of ["GBP", "EUR"]) if (px.USD && px[c]) out[c] = round(px.USD / px[c], 6) as number;
+          return out;
+        }).catch(() => ({} as Record<string, number>))
+    : Promise.resolve({} as Record<string, number>);
+  const [cq, hist, cg, rq, fx] = await Promise.all([
     cnbc(stocks).catch((e) => { src("cnbc").note = String(e?.message || e); return {} as Record<string, Quote>; }),
     (async () => {
       const h: Record<string, number[][]> = {};
@@ -203,6 +215,7 @@ export default async (req: Request) => {
     })(),
     coingecko(crypto).catch((e) => { src("coingecko").note = String(e?.message || e); return {} as Record<string, Quote>; }),
     revxTickers(rx).catch((e) => { src("revolut-x").note = String(e?.message || e); return {} as Record<string, Quote>; }),
+    fxP,
   ]);
 
   for (const s of stocks) {
@@ -237,7 +250,7 @@ export default async (req: Request) => {
   }
 
   const allFailed = stocks.length + crypto.length + rx.length > 0 && !Object.keys(quotes).length;
-  return new Response(JSON.stringify({ updatedAt: Date.now(), quotes, errors, sources }), {
+  return new Response(JSON.stringify({ updatedAt: Date.now(), quotes, errors, sources, fx }), {
     status: allFailed ? 502 : 200,
     headers: {
       "content-type": "application/json; charset=utf-8",
