@@ -30,8 +30,8 @@ window.KRAFT_ASSETS = [
   // BTC TREASURY
   { sym: 'MSTR', tv: 'NASDAQ:MSTR', type: 'stock', grp: 'BTC treasury', cat: 'BTC treasury', name: 'Strategy',
     desc: 'Largest corporate bitcoin holder. Raises equity, converts and preferreds to buy BTC, so the stock behaves like leveraged bitcoin with a premium or discount to its holdings.' },
-  { sym: 'SMLR', tv: 'NASDAQ:SMLR', type: 'stock', grp: 'BTC treasury', cat: 'BTC treasury', name: 'Semler Scientific',
-    desc: 'Medical-device company that adopted a bitcoin treasury strategy in 2024. Check the Data tab if it shows no price: corporate actions can change or retire a ticker.' },
+  { sym: 'ASST', tv: 'NASDAQ:ASST', type: 'stock', grp: 'BTC treasury', cat: 'BTC treasury', name: 'Strive',
+    desc: 'Bitcoin treasury company that also runs an asset manager. Acquired Semler Scientific (SMLR) in January 2026, adding its bitcoin; SMLR holders received 21.05 ASST shares each.' },
 
   // BITCOIN MINERS
   { sym: 'MARA', tv: 'NASDAQ:MARA', type: 'stock', grp: 'Bitcoin miners', cat: 'BTC mining', name: 'MARA Holdings',

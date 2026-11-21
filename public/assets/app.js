@@ -88,6 +88,8 @@ const State = {
     for (const k of ['portfolio', 'watchlist', 'alerts', 'journal', 'chartSymbols']) if (!Array.isArray(this.data[k])) this.data[k] = this.defaults()[k];
     for (const k of ['watchlistNotes', 'custom', 'alertIntegrations', 'drawings']) if (!this.data[k] || typeof this.data[k] !== 'object') this.data[k] = this.defaults()[k];
     if (!this.data.chartSymbols.length) this.data.chartSymbols = [...DEFAULT_CHARTS];
+    // SMLR was delisted after Strive (ASST) acquired Semler Scientific in January 2026.
+    for (const k of ['watchlist', 'chartSymbols']) this.data[k] = [...new Set(this.data[k].map(x => (x === 'SMLR' ? 'ASST' : x)))];
     // Old builds stored ids as numbers / alerts without ids.
     this.data.alerts.forEach(a => { if (!a.id) a.id = uid(); });
   },
