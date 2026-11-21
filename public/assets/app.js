@@ -79,14 +79,14 @@ const State = {
   defaults: () => ({
     portfolio: [], watchlist: [...DEFAULT_WATCHLIST], alerts: [], journal: [],
     chartSymbols: [...DEFAULT_CHARTS], watchlistNotes: {}, custom: {},
-    alertIntegrations: { ntfy: '', discord: '' },
+    alertIntegrations: { ntfy: '', discord: '' }, drawings: {},
   }),
   load() {
     let d = null;
     try { d = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { d = null; }
     this.data = { ...this.defaults(), ...(d && typeof d === 'object' ? d : {}) };
     for (const k of ['portfolio', 'watchlist', 'alerts', 'journal', 'chartSymbols']) if (!Array.isArray(this.data[k])) this.data[k] = this.defaults()[k];
-    for (const k of ['watchlistNotes', 'custom', 'alertIntegrations']) if (!this.data[k] || typeof this.data[k] !== 'object') this.data[k] = this.defaults()[k];
+    for (const k of ['watchlistNotes', 'custom', 'alertIntegrations', 'drawings']) if (!this.data[k] || typeof this.data[k] !== 'object') this.data[k] = this.defaults()[k];
     if (!this.data.chartSymbols.length) this.data.chartSymbols = [...DEFAULT_CHARTS];
     // Old builds stored ids as numbers / alerts without ids.
     this.data.alerts.forEach(a => { if (!a.id) a.id = uid(); });
@@ -102,6 +102,10 @@ function asset(sym) {
   const known = ASSETS.find(a => a.sym === sym);
   if (known) return known;
   const c = State.data.custom[sym] || {};
+  if (c.kind === 'crypto') return {
+    sym, type: 'crypto', pair: c.pair || `${sym}-USD`, grp: 'Crypto', cat: 'Crypto · Revolut X', name: c.name || sym,
+    tv: `COINBASE:${sym}USD`, desc: `${c.name || sym}, priced from Revolut X.`,
+  };
   return {
     sym, type: 'stock', grp: 'Custom', cat: c.exchange || 'Custom', name: c.name || sym,
     tv: c.tv || (sym.includes('-USD') ? `COINBASE:${sym.replace('-', '')}` : `NASDAQ:${sym}`),
@@ -113,6 +117,7 @@ function trackedSymbols() {
   return [...new Set([
     ...d.watchlist, ...d.portfolio.map(p => p.symbol), ...d.alerts.map(a => a.symbol),
     ...d.chartSymbols, ...d.journal.flatMap(e => (e.assets || []).map(a => a.symbol)),
+    ...rxHeldCodes(),
   ].filter(Boolean))];
 }
 
@@ -140,7 +145,8 @@ async function fetchQuotes() {
   setStatus('busy', 'Updating');
   const syms = trackedSymbols();
   const stocks = syms.filter(s => asset(s).type === 'stock').sort();
-  const crypto = syms.map(s => asset(s)).filter(a => a.type === 'crypto').map(a => a.cg).sort();
+  const crypto = syms.map(s => asset(s)).filter(a => a.type === 'crypto' && a.cg).map(a => a.cg).sort();
+  const rx = syms.map(s => asset(s)).filter(a => a.type === 'crypto' && !a.cg && a.pair).map(a => a.pair).sort();
 
   const chunks = [];
   for (let i = 0; i < Math.max(stocks.length, 1); i += 60) chunks.push(stocks.slice(i, i + 60));
@@ -149,6 +155,7 @@ async function fetchQuotes() {
       const qs = new URLSearchParams();
       if (st.length) qs.set('stocks', st.join(','));
       if (i === 0 && crypto.length) qs.set('crypto', crypto.join(','));
+      if (i === 0 && rx.length) qs.set('rx', rx.join(','));
       return fetch('/api/quotes?' + qs, { signal: AbortSignal.timeout(25_000) }).then(async r => {
         const b = await r.json().catch(() => null);
         if (!b) throw new Error(`HTTP ${r.status}`);
@@ -167,9 +174,10 @@ async function fetchQuotes() {
     for (const [key, q] of Object.entries(merged.quotes)) {
       let sym = key;
       if (key.startsWith('cg:')) { const a = ASSETS.find(x => x.cg === key.slice(3)); if (!a) continue; sym = a.sym; }
+      else if (key.startsWith('rx:')) { const pair = key.slice(3); sym = syms.find(x => asset(x).pair === pair); if (!sym) continue; }
       Q[sym] = { ...q, symbol: sym, fetchedAt: Date.now() };
       // Remember names / exchanges for tickers the user added.
-      if (!ASSETS.find(a => a.sym === sym)) {
+      if (!ASSETS.find(a => a.sym === sym) && q.type === 'stock') {
         const c = State.data.custom[sym] ||= {};
         if (q.name) c.name = q.name;
         if (q.tv) c.tv = q.tv;
@@ -188,6 +196,7 @@ async function fetchQuotes() {
   updateStatus();
   render();
   checkAlerts();
+  if (tab === 'charts') chartTick();
 }
 
 function updateStatus() {
@@ -264,14 +273,17 @@ function render() {
 
 // ── overview ──────────────────────────────────────────────────────────────
 let hmPeriod = '24h';
+function allPositions() { return [...State.data.portfolio, ...rxPositions()]; }
 function portfolioTotals() {
   let value = 0, cost = 0, day = 0, priced = 0;
-  for (const p of State.data.portfolio) {
+  for (const p of allPositions()) {
+    if (!isNum(p.avgCost)) { const d = Q[p.symbol]; if (isNum(d?.price)) { value += p.shares * d.price; priced++; if (isNum(d.change)) day += p.shares * d.change; } continue; }
     const d = Q[p.symbol];
     cost += p.shares * p.avgCost;
     if (isNum(d?.price)) { value += p.shares * d.price; priced++; if (isNum(d.change)) day += p.shares * d.change; }
   }
-  return { value, cost, day, priced };
+  const cash = rxCash();
+  return { value: value + cash, invested: value, cash, cost, day, priced };
 }
 function tileHTML(label, value, sub = '', valCls = '') {
   return `<div class="tile"><div class="tile-top"><span class="mono">${label}</span></div><div class="big ${valCls}">${value}</div><div class="chips">${sub}</div></div>`;
@@ -290,7 +302,7 @@ function renderOverview() {
       State.data.portfolio.length ? `<span>Day ${pctSpan(pt.value - pt.day ? pt.day / (pt.value - pt.day) * 100 : null)}</span><span class="${fmt.cls(pt.day)}">${fmt.usd(pt.day, 0)}</span>` : '<span>No positions yet</span>'),
     tileHTML('Watchlist 24h', avg == null ? '—' : fmt.pct(avg), `<span class="up">${ups} up</span><span>${downs} down</span>`, fmt.cls(avg)),
     tileHTML('Bitcoin', btc ? fmt.price(btc.price) : '—', btc ? `<span>24h ${pctSpan(btc.changePct)}</span><span>7D ${pctSpan(btc.changePct7d)}</span>` : ''),
-    tileHTML('Market cap', mcap ? fmt.big(mcap) : '—', `<span>${pd.length} of ${wl.length} priced</span>`),
+    rxConnected() ? rxTile() : tileHTML('Market cap', mcap ? fmt.big(mcap) : '—', `<span>${pd.length} of ${wl.length} priced</span>`),
   ].join('');
 
   const movers = (field, title) => {
@@ -329,10 +341,11 @@ function renderHeatmap() {
 
 // ── portfolio ─────────────────────────────────────────────────────────────
 function renderPortfolio() {
-  const port = State.data.portfolio;
+  const port = allPositions();
   const pt = portfolioTotals();
-  const pnl = pt.priced ? pt.value - port.filter(p => isNum(Q[p.symbol]?.price)).reduce((a, p) => a + p.shares * p.avgCost, 0) : null;
-  const pricedCost = port.filter(p => isNum(Q[p.symbol]?.price)).reduce((a, p) => a + p.shares * p.avgCost, 0);
+  const costed = port.filter(p => isNum(Q[p.symbol]?.price) && isNum(p.avgCost));
+  const pricedCost = costed.reduce((a, p) => a + p.shares * p.avgCost, 0);
+  const pnl = costed.length ? costed.reduce((a, p) => a + p.shares * Q[p.symbol].price, 0) - pricedCost : null;
   const ret = pnl != null && pricedCost ? pnl / pricedCost * 100 : null;
   const dayPct = pt.value - pt.day ? pt.day / (pt.value - pt.day) * 100 : null;
   const t = (l, v, c = '') => `<div class="tile"><span class="mono">${l}</span><div class="mid ${c}">${v}</div></div>`;
@@ -342,15 +355,15 @@ function renderPortfolio() {
     t('Day P&amp;L', port.length ? fmt.usd(pt.day) : '—', fmt.cls(pt.day)), t('Day', fmt.pct(dayPct), fmt.cls(dayPct)),
   ].join('');
 
-  if (!port.length) {
-    $('#pf-table').innerHTML = '<div class="empty">No positions yet. Add one here, or from any watchlist card.</div>';
+  if (!port.length && !pt.cash) {
+    $('#pf-table').innerHTML = '<div class="empty">No positions yet. Add one here, from any watchlist card, or connect Revolut X on the Data tab.</div>';
     $('#pf-alloc').innerHTML = '';
     return;
   }
   const rows = port.map(p => {
     const d = Q[p.symbol], price = d?.price;
-    const val = isNum(price) ? p.shares * price : null, cost = p.shares * p.avgCost;
-    const pl = val != null ? val - cost : null;
+    const val = isNum(price) ? p.shares * price : null, cost = isNum(p.avgCost) ? p.shares * p.avgCost : null;
+    const pl = val != null && cost != null ? val - cost : null;
     return { p, d, price, val, cost, pl, plPct: pl != null && cost ? pl / cost * 100 : null, day: isNum(d?.change) ? p.shares * d.change : null };
   }).sort((a, b) => (b.val ?? -1) - (a.val ?? -1));
   $('#pf-table').innerHTML = `<table class="data"><thead><tr>
@@ -358,9 +371,9 @@ function renderPortfolio() {
     </tr></thead><tbody>${rows.map(r => {
       const w = pt.value && r.val ? r.val / pt.value * 100 : null;
       return `<tr>
-        <td><div class="sym">${esc(r.p.symbol)}</div><div class="nm">${esc(r.p.notes || asset(r.p.symbol).name)}</div></td>
+        <td><div class="sym">${esc(r.p.symbol)}${r.p.rx ? ' <span class="pill tiny">Revolut X</span>' : ''}</div><div class="nm">${esc(r.p.notes || asset(r.p.symbol).name)}</div></td>
         <td>${r.p.shares.toLocaleString('en-US', { maximumFractionDigits: 8 })}</td>
-        <td>${fmt.price(r.p.avgCost)}</td>
+        <td title="${r.p.rx ? esc(r.p.costNote || '') : ''}">${fmt.price(r.p.avgCost)}${r.p.partial ? '<span class="na">*</span>' : ''}</td>
         <td class="${flash(r.p.symbol)}">${fmt.price(r.price)}</td>
         <td>${pctSpan(r.d?.changePct)}</td>
         <td>${fmt.usd(r.val)}</td>
@@ -368,11 +381,13 @@ function renderPortfolio() {
         <td>${pctSpan(r.plPct)}</td>
         <td class="${fmt.cls(r.day)}">${fmt.usd(r.day)}</td>
         <td>${w == null ? '—' : w.toFixed(1) + '%'}<span class="share"><i style="width:${w || 0}%"></i></span></td>
-        <td><button class="btn ghost small" type="button" data-action="edit-position" data-id="${esc(r.p.id)}">Edit</button></td>
+        <td>${r.p.rx ? '<span class="na mono" style="font-size:10px">Synced</span>' : `<button class="btn ghost small" type="button" data-action="edit-position" data-id="${esc(r.p.id)}">Edit</button>`}</td>
       </tr>`;
-    }).join('')}</tbody></table>`;
+    }).join('')}${pt.cash ? `<tr class="total"><td><div class="sym">Cash</div><div class="nm">Revolut X ${esc(rxCashLabel())}</div></td><td></td><td></td><td></td><td></td><td>${fmt.usd(pt.cash)}</td><td></td><td></td><td></td><td>${(pt.cash / pt.value * 100).toFixed(1)}%<span class="share"><i style="width:${pt.cash / pt.value * 100}%"></i></span></td><td></td></tr>` : ''}</tbody></table>
+    ${port.some(p => p.partial) ? '<p class="mono" style="font-size:10.5px;margin-top:10px">* Average cost only covers coins bought in the trade history loaded (Data tab → Reload trade history). Hover the cost for details.</p>' : ''}`;
 
   const parts = rows.filter(r => r.val > 0);
+  if (pt.cash) parts.push({ p: { symbol: 'CASH' }, val: pt.cash });
   const shades = ['var(--green)', 'var(--steel-100)', 'var(--steel-300)', 'var(--steel-500)', 'var(--steel-700)'];
   $('#pf-alloc').innerHTML = parts.length ? `
     <div class="alloc" role="img" aria-label="Allocation bar">${parts.map((r, i) => `<i style="width:${r.val / pt.value * 100}%;background:${shades[Math.min(i, shades.length - 1)]}" title="${esc(r.p.symbol)}"></i>`).join('')}</div>
@@ -457,6 +472,7 @@ function renderWatchlist() {
       <div class="price-line"><span class="mid ${flash(sym)}">${fmt.price(d?.price)}</span>
         <span class="chg">${pctSpan(d?.changePct)} <span class="na">24h</span></span>
         <span class="chg">${pctSpan(d?.changePct7d)} <span class="na">7D</span></span></div>
+      ${d?.ext && d.ext.session !== 'REG_MKT' ? `<div class="chg mono" style="font-size:11px">${d.ext.session === 'PRE_MKT' ? 'Pre-market' : 'After hours'} ${fmt.price(d.ext.price)} ${pctSpan(d.ext.changePct)}</div>` : ''}
       ${sparkSVG(d?.spark)}
       <dl class="kv">
         <dt>Volume</dt><dd>${fmt.vol(d?.volume)}</dd>
@@ -480,8 +496,13 @@ function renderWatchlist() {
 }
 
 // ── charts ────────────────────────────────────────────────────────────────
-let chartIv = 'D';
+let chartIv = 'D';           // TradingView grid interval
 let chartsKey = '';
+let chMode = 'kraft', chTf = '1D', chTool = 'cursor', chSym = null, chCtl = null, chLoadedKey = '', chSelected = null;
+const chOv = { fills: true, orders: true, cost: true };
+const TF_SEC = { '15m': 900, '1H': 3600, '4H': 14400, '1D': 86400, '1W': 604800 };
+const candleCache = new Map();
+
 function tvSrc(sym, iv) {
   const p = new URLSearchParams({
     frameElementId: 'tv_' + sym, symbol: asset(sym).tv, interval: iv, hidesidetoolbar: '1', hidetoptoolbar: '0',
@@ -491,6 +512,107 @@ function tvSrc(sym, iv) {
   return 'https://s.tradingview.com/widgetembed/?' + p;
 }
 function renderCharts() {
+  $('#ch-kraft').hidden = chMode !== 'kraft';
+  $('#ch-tv').hidden = chMode !== 'tv';
+  $$('#ch-mode button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === chMode)));
+  $$('.ch-bar #ch-tf, .ch-bar #ch-tool').forEach(el => { el.style.display = chMode === 'kraft' ? '' : 'none'; });
+  $('#ch-sym').style.display = chMode === 'kraft' ? '' : 'none';
+  if (chMode === 'tv') return renderTvGrid();
+  const syms = [...new Set([...trackedSymbols()])];
+  if (!chSym || !syms.includes(chSym)) chSym = State.data.chartSymbols[0] && syms.includes(State.data.chartSymbols[0]) ? State.data.chartSymbols[0] : syms[0];
+  const sel = $('#ch-sym');
+  if (document.activeElement !== sel) sel.innerHTML = syms.map(s => `<option value="${esc(s)}"${s === chSym ? ' selected' : ''}>${esc(s)}</option>`).join('');
+  $$('#ch-tf button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tf === chTf)));
+  $$('#ch-tool button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tool === chTool)));
+  $('#ch-overlays').hidden = !rxConnected();
+  $$('#ch-overlays button').forEach(b => b.setAttribute('aria-pressed', String(chOv[b.dataset.ov])));
+  $('#ch-title').textContent = chSym;
+  $('#ch-name').textContent = asset(chSym).name;
+  $('#ch-dsym').textContent = chSym;
+  $('#ch-hint').textContent = chTool === 'fib' ? 'Click the swing start, then the swing end · Esc cancels'
+    : chTool === 'hline' ? 'Click a price to place a level' : 'Click a drawing to select it · F fib · H level';
+  if (!chCtl) {
+    if (!window.KraftChart) { $('#ch-msg').textContent = 'Chart library failed to load'; return; }
+    chCtl = KraftChart.mount($('#ch-box'), {
+      onDraw: d => {
+        const list = State.data.drawings[chSym] ||= [];
+        list.push({ id: uid(), created: new Date().toISOString(), ...d });
+        State.save(); chSelected = null; chTool = 'cursor';
+        chCtl.setTool(chTool); chCtl.setDrawings(list); renderCharts();
+      },
+      onSelect: d => { chSelected = d?.id || null; renderDrawingList(); },
+    });
+  }
+  chCtl.setTool(chTool);
+  loadChart();
+  renderDrawingList();
+}
+async function loadChart(force = false) {
+  const a = asset(chSym);
+  const k = a.type === 'crypto' ? 'crypto' : 'stock';
+  const s = k === 'crypto' ? (a.pair || `${chSym}-USD`) : chSym;
+  const key = `${s}|${k}|${chTf}`;
+  const cached = candleCache.get(key);
+  const fresh = cached && Date.now() - cached.at < (TF_SEC[chTf] < 86400 ? 60_000 : 600_000);
+  if (key === chLoadedKey && fresh && !force) { chartOverlays(); return; }
+  if (cached && key !== chLoadedKey) showBars(key, cached);
+  if (fresh && !force) return;
+  if (key !== chLoadedKey && !cached) { $('#ch-msg').hidden = false; $('#ch-msg').textContent = 'Loading ' + chSym + '…'; }
+  try {
+    const r = await fetch(`/api/candles?s=${encodeURIComponent(s)}&k=${k}&tf=${chTf}`, { signal: AbortSignal.timeout(20_000) });
+    const d = await r.json();
+    if (!r.ok || !d.bars?.length) throw new Error(d.error || 'no data');
+    const entry = { at: Date.now(), bars: d.bars, source: d.source };
+    candleCache.set(key, entry);
+    // Only draw if the user hasn't switched away meanwhile.
+    const a2 = asset(chSym), s2 = a2.type === 'crypto' ? (a2.pair || `${chSym}-USD`) : chSym;
+    if (`${s2}|${a2.type === 'crypto' ? 'crypto' : 'stock'}|${chTf}` === key) showBars(key, entry);
+  } catch (e) {
+    if (key !== chLoadedKey) { $('#ch-msg').hidden = false; $('#ch-msg').textContent = `No ${chTf} candles for ${chSym}: ${e.message}`; }
+  }
+}
+function showBars(key, entry) {
+  $('#ch-msg').hidden = true;
+  const sameSeries = key === chLoadedKey;
+  chLoadedKey = key;
+  if (sameSeries) chCtl.updateBars(entry.bars); else chCtl.setBars(entry.bars, TF_SEC[chTf]);
+  $('#ch-src').textContent = `${chTf} · ${{ cnbc: 'CNBC', nasdaq: 'Nasdaq', 'revolut-x': 'Revolut X', hyperliquid: 'Hyperliquid' }[entry.source] || entry.source} · times UTC`;
+  chCtl.setDrawings(State.data.drawings[chSym] || []);
+  chartOverlays();
+}
+function chartOverlays() {
+  if (!chCtl) return;
+  const marks = [], lines = [];
+  if (rxConnected()) {
+    const base = chSym;
+    if (chOv.fills) for (const o of rxOrdersFor(base)) {
+      marks.push({ time: Math.floor((o.updated || o.created) / 1000), side: o.side, text: `${o.side === 'buy' ? 'B' : 'S'} ${fmt.price(+o.average_fill_price)}` });
+    }
+    if (chOv.orders) for (const o of (RX.live?.orders || []).filter(o => pairBase(o.symbol) === base)) {
+      const px = +(o.price || o.trigger || 0);
+      if (px > 0) lines.push({ price: px, dashed: true, color: o.side === 'buy' ? '#39FF14' : '#dfe2e5', title: `${o.side.toUpperCase()} ${(+o.quantity || 0).toString()}` });
+    }
+    const pos = rxPositions().find(p => p.symbol === base);
+    if (chOv.cost && pos && isNum(pos.avgCost)) lines.push({ price: pos.avgCost, color: '#a7acb2', title: 'Avg cost' + (pos.partial ? '*' : '') });
+  }
+  for (const p of State.data.portfolio.filter(p => p.symbol === chSym)) lines.push({ price: p.avgCost, color: '#80858b', dashed: true, title: 'Manual cost' });
+  chCtl.setOverlays({ marks, lines });
+}
+function chartTick() { if (chMode === 'kraft' && chCtl && chSym) loadChart(); }
+function renderDrawingList() {
+  const list = State.data.drawings[chSym] || [];
+  chCtl?.select(chSelected);
+  $('#ch-drawings').innerHTML = list.length ? `<table class="data"><thead><tr><th>Drawing</th><th>From</th><th>To</th><th>0.5</th><th>0.618</th><th>Added</th><th></th></tr></thead><tbody>${
+    list.map(d => {
+      const sel = d.id === chSelected ? ' style="outline:1px solid var(--green)"' : '';
+      if (d.type === 'hline') return `<tr${sel}><td><span class="sym">Level</span></td><td>${fmt.price(d.price)}</td><td></td><td></td><td></td><td>${fmt.date(d.created)}</td><td><button class="linkbtn rm" type="button" data-action="del-drawing" data-id="${esc(d.id)}">Delete</button></td></tr>`;
+      const lv = l => d.p2 + (d.p1 - d.p2) * l;
+      return `<tr${sel}><td><span class="sym">Fib</span> <span class="nm">${new Date(d.t1 * 1000).toISOString().slice(0, 10)} → ${new Date(d.t2 * 1000).toISOString().slice(0, 10)}</span></td>
+        <td>${fmt.price(d.p1)}</td><td>${fmt.price(d.p2)}</td><td>${fmt.price(lv(0.5))}</td><td class="up">${fmt.price(lv(0.618))}</td><td>${fmt.date(d.created)}</td>
+        <td><button class="linkbtn rm" type="button" data-action="del-drawing" data-id="${esc(d.id)}">Delete</button></td></tr>`;
+    }).join('')}</tbody></table>` : '<div class="empty">No drawings yet. Choose Fib or Level above, then click on the chart.</div>';
+}
+function renderTvGrid() {
   const syms = State.data.chartSymbols;
   const key = syms.join(',') + '|' + chartIv;
   const opts = sel => [...new Set([...State.data.watchlist, sel])].map(s => `<option value="${esc(s)}"${s === sel ? ' selected' : ''}>${esc(s)}</option>`).join('');
@@ -509,10 +631,10 @@ function renderCharts() {
   $$('[data-px]').forEach(el => { const d = Q[el.dataset.px]; el.innerHTML = d ? `${fmt.price(d.price)} ${pctSpan(d.changePct)}` : ''; });
 }
 function showChart(sym) {
+  chSym = sym; chMode = 'kraft'; chSelected = null;
   const cs = State.data.chartSymbols;
   if (!cs.includes(sym)) { cs.unshift(sym); if (cs.length > 8) cs.pop(); State.save(); }
   setTab('charts');
-  requestAnimationFrame(() => $(`.chart-cell[data-i="${cs.indexOf(sym)}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
 }
 
 // ── alerts ────────────────────────────────────────────────────────────────
@@ -546,6 +668,7 @@ function renderAlerts() {
         <button class="btn ghost small danger" type="button" data-action="delete-alert" data-id="${esc(a.id)}">Delete</button></span>
     </div>`;
   }).join('') : '<div class="empty">No alerts yet.</div>';
+  renderRxOrders();
   // Seeing the list counts as acknowledging triggered alerts.
   let changed = false;
   al.forEach(a => { if (a.triggered && !a.seen) { a.seen = true; changed = true; } });
@@ -622,14 +745,15 @@ function renderJournal() {
         <button class="linkbtn" type="button" data-action="delete-snapshot" data-id="${esc(e.id)}">Delete</button></div>
     </article>`;
   }).join('') : `<div class="empty">No snapshots yet. Capture a thesis and today's prices, then check back to see whether you were right.</div>`;
+  renderRxTrades();
 }
-function snapshotModal() {
-  const syms = [...new Set([...State.data.watchlist, ...State.data.portfolio.map(p => p.symbol)])];
+function snapshotModal(preset = null) {
+  const syms = [...new Set([...(preset ? [preset.symbol] : []), ...State.data.watchlist, ...allPositions().map(p => p.symbol)])];
   openModal('New snapshot', `
     <form id="snap-form" class="m-body" style="padding:0">
       <div class="f"><span class="mono" style="font-size:10.5px">Assets</span>
-        <div class="picklist">${syms.map(s => `<label><input type="checkbox" name="snap" value="${esc(s)}"> ${esc(s)} <span class="px">${fmt.price(Q[s]?.price)}</span></label>`).join('')}</div></div>
-      <label class="f"><span>Thesis</span><textarea id="snap-thesis" required maxlength="4000" placeholder="What you expect, why, and what would prove you wrong"></textarea></label>
+        <div class="picklist">${syms.map(s => `<label><input type="checkbox" name="snap" value="${esc(s)}"${preset?.symbol === s ? ' checked' : ''}> ${esc(s)} <span class="px">${preset?.symbol === s ? `${preset.side} fill ${fmt.price(preset.price)}` : fmt.price(Q[s]?.price)}</span></label>`).join('')}</div></div>
+      <label class="f"><span>Thesis</span><textarea id="snap-thesis" required maxlength="4000" placeholder="What you expect, why, and what would prove you wrong">${preset ? esc(`${preset.side === 'buy' ? 'Bought' : 'Sold'} ${preset.qty} ${preset.symbol} at ${fmt.price(preset.price)} on Revolut X (${fmt.date(preset.time)}). Why: `) : ''}</textarea></label>
       <label class="f"><span>Tags, comma separated</span><input id="snap-tags" maxlength="200" placeholder="bullish, earnings, macro"></label>
       <div class="m-foot"><button class="btn ghost" type="button" data-action="close-modal">Cancel</button><button class="btn" type="submit">Save snapshot</button></div>
     </form>`);
@@ -640,21 +764,26 @@ function snapshotModal() {
     const tags = [...new Set($('#snap-tags').value.split(',').map(t => t.trim().toLowerCase()).filter(Boolean))];
     if (!picked.length) return toast('Pick at least one asset', true);
     if (!thesis) return toast('Write your thesis, even one sentence', true);
-    const missing = picked.filter(s => !isNum(Q[s]?.price));
+    const missing = picked.filter(s => !isNum(Q[s]?.price) && preset?.symbol !== s);
     if (missing.length && !confirm(`No current price for ${missing.join(', ')}. Save anyway? Those won't be scored.`)) return;
-    State.data.journal.push({ id: uid(), date: new Date().toISOString(), assets: picked.map(s => ({ symbol: s, price: Q[s]?.price ?? null })), thesis, tags });
+    State.data.journal.push({
+      id: uid(), date: preset ? new Date(preset.time).toISOString() : new Date().toISOString(),
+      assets: picked.map(s => ({ symbol: s, price: preset?.symbol === s ? preset.price : Q[s]?.price ?? null })), thesis,
+      tags: preset && !tags.includes('revolut-x') ? [...tags, 'revolut-x'] : tags, ...(preset ? { tradeId: preset.id } : {}),
+    });
     State.save(); closeModal(); render();
   });
 }
 
 // ── data tab ──────────────────────────────────────────────────────────────
 const SOURCE_INFO = {
-  'yahoo-chart': ['Yahoo Finance chart', 'Stock prices, previous close, 7D, MA50/200, 52W range, sparkline'],
-  'yahoo-quote': ['Yahoo Finance quote', 'Market cap, analyst rating, price target (best effort)'],
-  stooq: ['Stooq', 'Fallback stock price when Yahoo fails'],
-  coingecko: ['CoinGecko', 'Crypto prices, 24h/7D change, market cap, sparkline'],
+  cnbc: ['CNBC quotes', 'Stock prices, previous close, volume, market cap, 52W range, pre/post-market'],
+  history: ['Daily candles', 'CNBC (Nasdaq fallback) daily history: 7D, MA50/200, sparkline'],
+  coingecko: ['CoinGecko', 'BTC, ETH, HYPE: price, 24h/7D, market cap, sparkline'],
+  'revolut-x': ['Revolut X tickers', 'Prices for other coins, e.g. your Revolut X holdings'],
 };
 function renderData() {
+  renderRxData();
   const d = State.data;
   $('#dt-counts').textContent = `${d.portfolio.length} positions, ${d.watchlist.length} watchlist tickers, ${d.alerts.length} alerts, ${d.journal.length} journal entries, ${Object.values(d.watchlistNotes).filter(Boolean).length} notes.`;
   const r = LastResp;
@@ -683,6 +812,7 @@ function exportData() {
 async function importData(file) {
   try {
     const j = JSON.parse(await file.text());
+    if (j?.app === 'kraft-terminal-revx') return rxImport(j);
     const d = j?.data && typeof j.data === 'object' ? j.data : j;
     if (!Array.isArray(d.watchlist) && !Array.isArray(d.journal) && !Array.isArray(d.portfolio)) throw new Error('not a KRAFT Terminal or CRYPTERM backup');
     const n = `${(d.portfolio || []).length} positions, ${(d.journal || []).length} journal entries, ${(d.alerts || []).length} alerts`;
@@ -692,6 +822,167 @@ async function importData(file) {
     toast('Imported ' + n);
     render(); fetchQuotes();
   } catch (e) { toast('Import failed: ' + e.message, true); }
+}
+
+// ── Revolut X ────────────────────────────────────────────────────────────
+// Two ways in: live (this site's /api/revx function with your read-only API key, token-protected)
+// or a snapshot file imported on the Data tab. Both feed the same views.
+const RX_TOKEN_KEY = 'kraft_terminal_revx_token';
+const RX_CACHE_KEY = 'kraft_terminal_revx';
+const FIATS = new Set(['USD', 'EUR', 'GBP', 'USDC', 'USDT']);
+const RX = { server: null, live: null, history: null, mode: null, err: null, busy: false };
+const rxToken = () => { try { return localStorage.getItem(RX_TOKEN_KEY) || ''; } catch { return ''; } };
+const pairBase = sym => String(sym || '').split(/[\/-]/)[0].toUpperCase();
+const pairQuote = sym => String(sym || '').split(/[\/-]/)[1]?.toUpperCase() || 'USD';
+function rxConnected() { return !!RX.live; }
+function rxSave() { try { localStorage.setItem(RX_CACHE_KEY, JSON.stringify({ live: RX.live, history: RX.history, mode: RX.mode })); } catch { /* ignore */ } }
+function rxLoad() {
+  try { const c = JSON.parse(localStorage.getItem(RX_CACHE_KEY) || 'null'); if (c) Object.assign(RX, { live: c.live, history: c.history, mode: c.mode }); } catch { /* ignore */ }
+  rxRegister();
+}
+function rxHeldCodes() {
+  return (RX.live?.balances || []).filter(b => !FIATS.has(b.currency) && +b.total > 0).map(b => b.currency);
+}
+// Make sure every coin you hold on Revolut X is a known asset (priced from Revolut X if CoinGecko isn't wired for it).
+function rxRegister() {
+  let changed = false;
+  for (const code of rxHeldCodes()) {
+    if (ASSETS.find(a => a.sym === code) || State.data.custom[code]?.kind === 'crypto') continue;
+    State.data.custom[code] = { kind: 'crypto', pair: `${code}-USD`, name: code };
+    changed = true;
+  }
+  if (changed) State.save();
+}
+function rxTickerPrice(code) {
+  const t = (RX.live?.tickers || []).find(t => pairBase(t.symbol) === code && pairQuote(t.symbol) === 'USD');
+  return t ? +t.last : null;
+}
+function rxOrdersFor(code) {
+  return (RX.history?.orders || []).filter(o => pairBase(o.symbol) === code && +o.filled_quantity > 0 && +o.average_fill_price > 0);
+}
+// Average cost from filled orders (oldest first). Sells reduce the quantity at the running average.
+function rxCostBasis(code, held) {
+  let qty = 0, cost = 0, other = 0;
+  for (const o of rxOrdersFor(code)) {
+    const q = +o.filled_quantity, px = +o.average_fill_price;
+    if (!['USD', 'USDC', 'USDT'].includes(pairQuote(o.symbol))) { other++; continue; }
+    if (o.side === 'buy') { qty += q; cost += q * px; }
+    else if (qty > 0) { const sold = Math.min(q, qty); cost -= sold * (cost / qty); qty -= sold; }
+  }
+  if (qty <= 1e-12) return { avgCost: null, partial: true, note: 'No USD buys in the loaded trade history' };
+  const partial = qty < held * 0.98 || other > 0;
+  const since = RX.history?.from ? new Date(RX.history.from).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '';
+  return {
+    avgCost: cost / qty, partial,
+    note: partial ? `Average of ${+qty.toPrecision(6)} of ${+held.toPrecision(6)} held, from buys since ${since}${other ? `; ${other} non-USD orders skipped` : ''}` : `From your buys since ${since}`,
+  };
+}
+function rxPositions() {
+  if (!RX.live) return [];
+  return (RX.live.balances || []).filter(b => !FIATS.has(b.currency) && +b.total > 0).map(b => {
+    const held = +b.total, cb = rxCostBasis(b.currency, held);
+    return { id: 'rx:' + b.currency, rx: true, symbol: b.currency, shares: held, avgCost: cb.avgCost, partial: cb.partial, costNote: cb.note, notes: 'Revolut X' };
+  });
+}
+function rxCash() { return (RX.live?.balances || []).filter(b => ['USD', 'USDC', 'USDT'].includes(b.currency)).reduce((a, b) => a + (+b.total || 0), 0); }
+function rxCashLabel() {
+  const other = (RX.live?.balances || []).filter(b => ['EUR', 'GBP'].includes(b.currency) && +b.total > 0);
+  return other.length ? `(USD; ${other.map(b => `${b.currency} ${(+b.total).toFixed(2)}`).join(', ')} not counted)` : '(USD)';
+}
+function rxTile() {
+  const pos = rxPositions();
+  let inv = 0;
+  for (const p of pos) { const px = Q[p.symbol]?.price ?? rxTickerPrice(p.symbol); if (isNum(px)) inv += p.shares * px; }
+  const cash = rxCash(), tot = inv + cash;
+  return `<div class="tile"><div class="tile-top"><span class="mono">Revolut X</span><span class="mono">${RX.mode === 'import' ? 'snapshot' : 'live'}</span></div>
+    <div class="big">${tot ? fmt.usd(tot, 0) : '—'}</div>
+    <div class="chips"><span>Crypto ${tot ? (inv / tot * 100).toFixed(0) : 0}%</span><span>Cash ${fmt.usd(cash, 0)}</span><span>${(RX.live.orders || []).length} open orders</span></div></div>`;
+}
+async function rxFetch(view, extra = '') {
+  const r = await fetch(`/api/revx?view=${view}${extra}`, { headers: { 'x-terminal-token': rxToken() }, cache: 'no-store', signal: AbortSignal.timeout(60_000) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+async function rxSync({ history = false, quiet = false } = {}) {
+  if (!rxToken() || RX.busy) return;
+  RX.busy = true;
+  const msg = $('#rx-msg');
+  if (!quiet && msg) msg.textContent = history ? 'Loading 12 months of filled orders…' : 'Syncing…';
+  try {
+    const wasImport = RX.mode !== 'server';
+    RX.live = await rxFetch('live');
+    RX.mode = 'server';
+    const stale = !RX.history || wasImport || Date.now() - (RX.history.at || 0) > 6 * 3600_000;
+    if (history || stale) RX.history = await rxFetch('history', '&months=12');
+    RX.err = null;
+    rxRegister(); rxSave();
+    if (!quiet && msg) msg.innerHTML = `<span class="up">Synced ${fmt.time(Date.now())}: ${rxHeldCodes().length} coins, ${(RX.live.orders || []).length} open orders, ${(RX.history?.orders || []).length} filled orders.</span>`;
+    if (rxHeldCodes().some(c => !isNum(Q[c]?.price))) fetchQuotes(); else render();
+  } catch (e) {
+    RX.err = e.message;
+    if (msg) msg.textContent = 'Revolut X: ' + e.message;
+    render();
+  } finally { RX.busy = false; }
+}
+async function rxCheckServer() {
+  try { RX.server = (await fetch('/api/revx?view=status', { cache: 'no-store' }).then(r => r.json())).configured; }
+  catch { RX.server = null; }
+  if (tab === 'data') renderRxData();
+}
+function rxImport(j) {
+  const live = j.live || j, history = j.history || null;
+  if (!Array.isArray(live.balances)) throw new Error('not a Revolut X snapshot');
+  RX.live = { at: Date.parse(j.exportedAt) || Date.now(), balances: live.balances, orders: live.orders || [], tickers: live.tickers || [] };
+  RX.history = history ? { at: RX.live.at, from: history.from || null, orders: history.orders || [] } : RX.history;
+  RX.mode = 'import'; RX.err = null;
+  rxRegister(); rxSave();
+  toast(`Imported Revolut X snapshot: ${rxHeldCodes().length} coins, ${(RX.history?.orders || []).length} filled orders`);
+  fetchQuotes();
+}
+function renderRxData() {
+  const st = $('#rx-status-text');
+  if (!st) return;
+  const lines = [];
+  lines.push(RX.server === true ? 'Server key: <span class="up">configured</span>.' : RX.server === false ? 'Server key: not set up yet (see Setup). You can still import a snapshot file.' : 'Server key: checking…');
+  if (rxToken()) lines.push('Access token: saved in this browser.');
+  if (RX.live) lines.push(`Data: ${RX.mode === 'import' ? 'imported snapshot' : 'live'} from ${fmt.ago(RX.live.at)}. ${rxHeldCodes().join(', ') || 'No coins'} · ${fmt.usd(rxCash())} cash.`);
+  if (RX.err) lines.push(`<span class="down">Last error: ${esc(RX.err)}</span>`);
+  st.innerHTML = lines.join('<br>');
+  $('#rx-state').textContent = RX.live ? (RX.mode === 'import' ? 'Snapshot' : 'Live') : 'Not connected';
+}
+function renderRxOrders() {
+  const wrap = $('#al-rx');
+  const orders = RX.live?.orders || [];
+  wrap.hidden = !RX.live;
+  if (!RX.live) return;
+  $('#al-rx-sum').textContent = `${orders.length} open`;
+  $('#al-rx-orders').innerHTML = orders.length ? `<table class="data"><thead><tr><th>Pair</th><th>Side</th><th>Type</th><th>Quantity</th><th>Price</th><th>Now</th><th>To fill</th><th>Placed</th></tr></thead><tbody>${
+    orders.map(o => {
+      const base = pairBase(o.symbol), now = Q[base]?.price ?? rxTickerPrice(base), px = +(o.price || o.trigger || 0);
+      const dist = isNum(now) && px ? (px - now) / now * 100 : null;
+      return `<tr><td><span class="sym">${esc(o.symbol)}</span></td><td class="${o.side === 'buy' ? 'up' : 'down'}">${esc(o.side)}</td><td>${esc(o.type)}</td>
+        <td>${esc(o.quantity || o.amount || '')}</td><td>${fmt.price(px)}</td><td>${fmt.price(now)}</td><td>${fmt.pct(dist, 1)}</td><td>${o.created ? fmt.date(o.created) : '—'}</td></tr>`;
+    }).join('')}</tbody></table>` : '<div class="empty">No open orders.</div>';
+}
+function renderRxTrades() {
+  const wrap = $('#jn-rx');
+  const orders = [...(RX.history?.orders || [])].reverse();
+  wrap.hidden = !RX.history;
+  if (!RX.history) return;
+  $('#jn-rx-sum').textContent = `${orders.length} filled orders since ${RX.history.from ? new Date(RX.history.from).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }) : '—'}`;
+  const linked = new Set(State.data.journal.map(e => e.tradeId).filter(Boolean));
+  $('#jn-rx-trades').innerHTML = orders.length ? `<table class="data"><thead><tr><th>Date</th><th>Pair</th><th>Side</th><th>Quantity</th><th>Fill price</th><th>Now</th><th>Move since</th><th></th></tr></thead><tbody>${
+    orders.slice(0, 150).map(o => {
+      const base = pairBase(o.symbol), now = Q[base]?.price ?? rxTickerPrice(base), px = +o.average_fill_price;
+      const mv = isNum(now) && px ? (now - px) / px * 100 : null;
+      // for a buy, up is good; for a sell, down is good: colour by outcome of the decision
+      const good = mv == null ? null : o.side === 'buy' ? mv : -mv;
+      return `<tr><td><span class="nm">${fmt.date(o.updated || o.created)}</span></td><td><span class="sym">${esc(o.symbol)}</span></td>
+        <td class="${o.side === 'buy' ? 'up' : 'down'}">${esc(o.side)}</td><td>${esc(o.filled_quantity)}</td><td>${fmt.price(px)}</td><td>${fmt.price(now)}</td>
+        <td class="${fmt.cls(good)}" title="Coloured by whether the ${o.side} has paid off">${fmt.pct(mv)}</td>
+        <td>${linked.has(o.id) ? '<span class="na mono" style="font-size:10px">In journal</span>' : `<button class="linkbtn" type="button" data-action="trade-thesis" data-id="${esc(o.id)}">Add thesis</button>`}</td></tr>`;
+    }).join('')}</tbody></table>` : '<div class="empty">No filled orders in the loaded period.</div>';
 }
 
 // ── modal & tooltip ───────────────────────────────────────────────────────
@@ -710,8 +1001,9 @@ function metricsHelp() {
     <dt>7D change</dt><dd>Against the last close at or before one calendar week ago, for both stocks and crypto.</dd>
     <dt>MA50 / MA200</dt><dd>Average daily close over 50 and 200 sessions, computed from a year of daily data. Above the 200-day is the usual definition of a long-term uptrend.</dd>
     <dt>52W range</dt><dd>The bar marks where today's price sits between the 52-week low (left) and high (right).</dd>
-    <dt>Signal</dt><dd>A mechanical score. Points for: price above MA50 (+1), above MA200 (+1), in the lower 35% of its 52-week range (+1), analyst rating ≤ 2.8 (+1) or ≤ 2.0 (+2), price target ≥ 5% (+1) or ≥ 20% (+2) above the price. At least 60% of available points is Buy, 30% or less is Sell, anything between is Hold. Crypto has no MA or analyst inputs here, so it shows N/A. A starting point for research, not advice.</dd>
-    <dt>Sources</dt><dd>Yahoo Finance for stocks (Stooq if Yahoo fails), CoinGecko for crypto, all fetched by this site's own server function and cached for 60 seconds. The Data tab shows which sources are healthy.</dd>
+    <dt>Signal</dt><dd>A mechanical trend score from three inputs: price above MA50 (+1), above MA200 (+1), and price in the lower 35% of its 52-week range (+1, a "value zone" point). Two or more of three is Buy, none is Sell, one is Hold. Coins priced from CoinGecko have no moving averages here, so they show N/A. A starting point for research, not advice.</dd>
+    <dt>Pre/post-market</dt><dd>Outside US hours, stock cards show the extended-hours price under the regular close.</dd>
+    <dt>Sources</dt><dd>CNBC for stock quotes, CNBC and Nasdaq for daily history, CoinGecko and Revolut X for crypto, all fetched by this site's own server function and cached for 60 seconds. (Yahoo Finance blocks requests from Netlify's servers, so it isn't used.) The Data tab shows which sources are healthy.</dd>
   </dl><div class="m-foot"><button class="btn" type="button" data-action="close-modal">Got it</button></div>`);
 }
 
@@ -729,11 +1021,15 @@ document.addEventListener('mousemove', e => {
 
 // ── events ────────────────────────────────────────────────────────────────
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-action], [data-tab], [data-period], [data-iv], [data-group], [data-tag]');
+  const t = e.target.closest('[data-action], [data-tab], [data-period], [data-iv], [data-group], [data-tag], [data-tf], [data-tool], [data-mode], [data-ov]');
   if (!t) return;
   if (t.dataset.tab && t.getAttribute('role') === 'tab') return setTab(t.dataset.tab);
   if (t.dataset.period) { hmPeriod = t.dataset.period; $$('#hm-period button').forEach(b => b.setAttribute('aria-pressed', String(b === t))); return renderHeatmap(); }
   if (t.dataset.iv) { chartIv = t.dataset.iv; $$('#ch-interval button').forEach(b => b.setAttribute('aria-pressed', String(b === t))); return renderCharts(); }
+  if (t.dataset.tf) { chTf = t.dataset.tf; return renderCharts(); }
+  if (t.dataset.tool) { chTool = t.dataset.tool; chCtl?.setTool(chTool); return renderCharts(); }
+  if (t.dataset.mode) { chMode = t.dataset.mode; chartsKey = ''; return renderCharts(); }
+  if (t.dataset.ov) { chOv[t.dataset.ov] = !chOv[t.dataset.ov]; renderCharts(); return chartOverlays(); }
   if (t.dataset.group) { wlGroup = t.dataset.group; return renderWatchlist(); }
   if (t.dataset.tag) { jnTag = t.dataset.tag; return renderJournal(); }
   const { action, sym, id } = t.dataset;
@@ -777,6 +1073,23 @@ document.addEventListener('click', e => {
       if (!confirm('Delete this snapshot?')) return;
       d.journal = d.journal.filter(x => x.id !== id); State.save(); return render();
     case 'export': return exportData();
+    case 'del-drawing':
+      d.drawings[chSym] = (d.drawings[chSym] || []).filter(x => x.id !== id);
+      if (!d.drawings[chSym].length) delete d.drawings[chSym];
+      State.save(); chSelected = null; chCtl?.setDrawings(d.drawings[chSym] || []); return renderDrawingList();
+    case 'clear-drawings':
+      if (!(d.drawings[chSym] || []).length || !confirm(`Delete all drawings on ${chSym}?`)) return;
+      delete d.drawings[chSym]; State.save(); chCtl?.setDrawings([]); return renderDrawingList();
+    case 'rx-sync': return rxToken() ? rxSync() : toast('Paste your access token first', true);
+    case 'rx-history': return rxToken() ? rxSync({ history: true }) : toast('Paste your access token first', true);
+    case 'rx-disconnect':
+      try { localStorage.removeItem(RX_TOKEN_KEY); localStorage.removeItem(RX_CACHE_KEY); } catch { /* ignore */ }
+      Object.assign(RX, { live: null, history: null, mode: null, err: null }); toast('Revolut X data and token removed from this browser'); return render();
+    case 'trade-thesis': {
+      const o = (RX.history?.orders || []).find(x => x.id === id);
+      if (o) snapshotModal({ id: o.id, symbol: pairBase(o.symbol), side: o.side, qty: o.filled_quantity, price: +o.average_fill_price, time: o.updated || o.created });
+      return;
+    }
     case 'reset':
       if (!confirm('Erase all positions, alerts, journal entries and notes in this browser? Export a backup first if unsure.')) return;
       localStorage.removeItem(STORE_KEY); State.load(); chartsKey = ''; render(); return fetchQuotes();
@@ -785,6 +1098,15 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.mover[data-action]')) { e.preventDefault(); e.target.click(); }
+  if (tab !== 'charts' || chMode !== 'kraft' || e.target.matches('input, textarea, select') || $('#modal').open) return;
+  const k = e.key.toLowerCase();
+  if (k === 'escape') { chTool = 'cursor'; chSelected = null; chCtl?.setTool('cursor'); renderCharts(); }
+  else if (k === 'f' || k === 'h') { chTool = k === 'f' ? 'fib' : 'hline'; chCtl?.setTool(chTool); renderCharts(); }
+  else if ((k === 'delete' || k === 'backspace') && chSelected) {
+    e.preventDefault();
+    State.data.drawings[chSym] = (State.data.drawings[chSym] || []).filter(x => x.id !== chSelected);
+    State.save(); chSelected = null; chCtl?.setDrawings(State.data.drawings[chSym]); renderDrawingList();
+  }
 });
 $('#modal').addEventListener('click', e => { if (e.target === $('#modal')) closeModal(); });
 document.addEventListener('focusout', e => {
@@ -797,12 +1119,27 @@ document.addEventListener('focusout', e => {
 });
 document.addEventListener('change', e => {
   if (e.target.matches('[data-chart-i]')) { State.data.chartSymbols[+e.target.dataset.chartI] = e.target.value; State.save(); renderCharts(); }
+  if (e.target.id === 'ch-sym') { chSym = e.target.value; chSelected = null; e.target.blur(); renderCharts(); }
   if (e.target.id === 'al-sym') updateAlertHint();
   if (e.target.id === 'import-file' && e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
 });
+$('#rx-token-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = $('#rx-token').value.trim();
+  if (v.length < 16) return toast('That token looks too short', true);
+  try { localStorage.setItem(RX_TOKEN_KEY, v); } catch { return toast('Browser storage is blocked', true); }
+  $('#rx-token').value = '';
+  rxSync({ history: true });
+});
 $('#wl-add-form').addEventListener('submit', e => {
   e.preventDefault();
-  const s = $('#wl-add').value.trim().toUpperCase();
+  let s = $('#wl-add').value.trim().toUpperCase();
+  const pm = s.match(/^([A-Z0-9]{2,10})[-\/](USD|USDC|USDT)$/);
+  if (pm) {
+    // A crypto pair: track it by its coin code, priced from Revolut X.
+    s = pm[1];
+    if (!ASSETS.find(a => a.sym === s)) State.data.custom[s] = { kind: 'crypto', pair: `${s}-USD`, name: s };
+  }
   if (!/^[A-Z0-9.\-^=]{1,15}$/.test(s)) return toast('Enter a ticker like NVDA, SHOP.TO or ETH-USD', true);
   if (State.data.watchlist.includes(s)) return toast(s + ' is already on your watchlist');
   State.data.watchlist.push(s); State.save();
@@ -829,11 +1166,15 @@ document.addEventListener('visibilitychange', () => {
 
 // ── boot ──────────────────────────────────────────────────────────────────
 State.load();
+rxLoad();
 const cachedAt = loadCache();
 const clock = () => { $('#st-clock').textContent = new Date().toLocaleTimeString('en-GB', { timeZone: 'UTC' }) + ' UTC'; };
 clock(); setInterval(clock, 1000);
 setTab(location.hash.slice(1) || 'overview', false);
 if (cachedAt) { $('#st-updated').textContent = 'Cached ' + fmt.ago(cachedAt); updateStatus(); setStatus('busy', 'Updating'); }
 fetchQuotes();
+rxCheckServer();
+if (rxToken()) rxSync({ quiet: true });
 setInterval(() => { if (!document.hidden) fetchQuotes(); }, REFRESH_MS);
+setInterval(() => { if (!document.hidden && rxToken()) rxSync({ quiet: true }); }, 2 * REFRESH_MS);
 })();

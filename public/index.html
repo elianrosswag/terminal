@@ -92,7 +92,7 @@
         <header class="section-head">
           <p class="mono">03 — Watchlist</p>
           <h2 id="wl-h">Watchlist</h2>
-          <p class="note">Add any Yahoo Finance ticker: US stocks (NVDA), other listings (SHOP.TO) or crypto pairs (ETH-USD). The signal is a mechanical score, not advice; the guide explains it.</p>
+          <p class="note">Add any US-listed stock or ETF (NVDA, IBIT), or any coin on Revolut X as a pair (SOL-USD). The signal is a mechanical score, not advice; the guide explains it.</p>
         </header>
         <div class="sub-head">
           <div class="chipset" role="group" aria-label="Filter by group" id="wl-groups"></div>
@@ -113,20 +113,66 @@
         <header class="section-head">
           <p class="mono">04 — Charts</p>
           <h2 id="ch-h">Charts</h2>
-          <p class="note">TradingView charts with RSI and MACD. Swap a symbol from each chart's menu; the interval applies to every chart.</p>
+          <p class="note">Draw Fibonacci retracements and horizontal levels; they're saved per symbol and stay put when you change timeframe. With Revolut X connected, your fills, open orders and average cost appear on the chart.</p>
         </header>
-        <div class="sub-head">
-          <div class="chipset" role="group" aria-label="Interval" id="ch-interval">
-            <button type="button" data-iv="15" aria-pressed="false">15M</button>
-            <button type="button" data-iv="60" aria-pressed="false">1H</button>
-            <button type="button" data-iv="240" aria-pressed="false">4H</button>
-            <button type="button" data-iv="D" aria-pressed="true">1D</button>
-            <button type="button" data-iv="W" aria-pressed="false">1W</button>
-            <button type="button" data-iv="M" aria-pressed="false">1M</button>
+        <div class="sub-head ch-bar">
+          <div class="tools">
+            <label class="visually-hidden" for="ch-sym">Symbol</label>
+            <select id="ch-sym" class="mono-in" style="width:auto;min-width:130px"></select>
+            <div class="chipset" role="group" aria-label="Timeframe" id="ch-tf">
+              <button type="button" data-tf="15m" aria-pressed="false">15m</button>
+              <button type="button" data-tf="1H" aria-pressed="false">1H</button>
+              <button type="button" data-tf="4H" aria-pressed="false">4H</button>
+              <button type="button" data-tf="1D" aria-pressed="true">1D</button>
+              <button type="button" data-tf="1W" aria-pressed="false">1W</button>
+            </div>
           </div>
-          <div class="tools"><button class="btn" type="button" data-action="add-chart">Add chart</button></div>
+          <div class="tools">
+            <div class="chipset" role="group" aria-label="Drawing tool" id="ch-tool">
+              <button type="button" data-tool="cursor" aria-pressed="true" title="Select (Esc)">Select</button>
+              <button type="button" data-tool="fib" aria-pressed="false" title="Fibonacci retracement (F)">Fib</button>
+              <button type="button" data-tool="hline" aria-pressed="false" title="Horizontal line (H)">Level</button>
+            </div>
+            <div class="chipset" role="group" aria-label="View" id="ch-mode">
+              <button type="button" data-mode="kraft" aria-pressed="true">KRAFT</button>
+              <button type="button" data-mode="tv" aria-pressed="false">TradingView grid</button>
+            </div>
+          </div>
         </div>
-        <div class="grid g2" id="ch-grid"></div>
+
+        <div id="ch-kraft">
+          <div class="panel chart-main">
+            <div class="chart-head">
+              <div><span class="sym" id="ch-title"></span> <span class="nm" id="ch-name"></span></div>
+              <div class="mono" id="ch-hint">Pick Fib, then click the swing start and the swing end</div>
+            </div>
+            <div class="chart-box" id="ch-box"><div class="empty" id="ch-msg">Loading…</div></div>
+            <div class="chart-foot">
+              <div class="chipset" id="ch-overlays" role="group" aria-label="Revolut X overlays" hidden>
+                <button type="button" data-ov="fills" aria-pressed="true">My fills</button>
+                <button type="button" data-ov="orders" aria-pressed="true">Open orders</button>
+                <button type="button" data-ov="cost" aria-pressed="true">Avg cost</button>
+              </div>
+              <span class="mono" id="ch-src"></span>
+            </div>
+          </div>
+          <div class="sub-head"><h3>Drawings on <span id="ch-dsym"></span></h3><div class="tools"><button class="btn ghost small danger" type="button" data-action="clear-drawings">Clear all</button></div></div>
+          <div id="ch-drawings"></div>
+        </div>
+
+        <div id="ch-tv" hidden>
+          <div class="sub-head">
+            <div class="chipset" role="group" aria-label="Interval" id="ch-interval">
+              <button type="button" data-iv="15" aria-pressed="false">15M</button>
+              <button type="button" data-iv="60" aria-pressed="false">1H</button>
+              <button type="button" data-iv="240" aria-pressed="false">4H</button>
+              <button type="button" data-iv="D" aria-pressed="true">1D</button>
+              <button type="button" data-iv="W" aria-pressed="false">1W</button>
+            </div>
+            <div class="tools"><span class="mono">TradingView embeds can't save drawings</span><button class="btn" type="button" data-action="add-chart">Add chart</button></div>
+          </div>
+          <div class="grid g2" id="ch-grid"></div>
+        </div>
       </section>
 
       <!-- 05 ALERTS -->
@@ -151,6 +197,11 @@
 
         <div class="sub-head"><h3>Active and triggered</h3><span class="mono" id="al-summary"></span></div>
         <div id="al-list"></div>
+
+        <div id="al-rx" hidden>
+          <div class="sub-head"><h3>Open orders on Revolut X</h3><span class="mono" id="al-rx-sum"></span></div>
+          <div class="table-wrap" id="al-rx-orders"></div>
+        </div>
 
         <div class="sub-head"><h3>Notification channels</h3><span class="mono">Optional</span></div>
         <div class="grid g3">
@@ -191,6 +242,11 @@
           <div class="tools"><button class="btn" type="button" data-action="new-snapshot">New snapshot</button></div>
         </div>
         <div class="grid g2" id="jn-list"></div>
+
+        <div id="jn-rx" hidden>
+          <div class="sub-head"><h3>Revolut X trade log</h3><span class="mono" id="jn-rx-sum"></span></div>
+          <div class="table-wrap" id="jn-rx-trades"></div>
+        </div>
       </section>
 
       <!-- 07 DATA -->
@@ -220,6 +276,34 @@
           </div>
         </div>
 
+        <div class="sub-head"><h3>Revolut X</h3><span class="mono" id="rx-state"></span></div>
+        <div class="grid g2">
+          <div class="panel">
+            <div class="panel-h">Connection</div>
+            <p style="font-size:13.5px" id="rx-status-text">Checking…</p>
+            <form class="inline" id="rx-token-form" style="margin-top:14px" autocomplete="off">
+              <label class="visually-hidden" for="rx-token">Access token</label>
+              <input id="rx-token" type="password" placeholder="Access token (TERMINAL_TOKEN)" autocomplete="off">
+              <button class="btn" type="submit">Connect</button>
+            </form>
+            <div class="card-actions" style="margin-top:12px">
+              <button class="btn ghost small" type="button" data-action="rx-sync">Sync now</button>
+              <button class="btn ghost small" type="button" data-action="rx-history">Reload trade history</button>
+              <button class="btn ghost small danger" type="button" data-action="rx-disconnect">Forget token on this browser</button>
+            </div>
+            <div class="status-msg" id="rx-msg"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-h">Setup</div>
+            <ol class="steps">
+              <li>exchange.revolut.com → Profile → API keys: create a <b>read-only</b> key with the public key from <code>_private-revolut-x/public.pem</code>. No IP whitelist.</li>
+              <li>Netlify → this project → Environment variables (scope Functions): <code>REVX_API_KEY</code>, <code>REVX_PRIVATE_KEY</code> (the whole private.pem), <code>TERMINAL_TOKEN</code>. Then redeploy.</li>
+              <li>Paste the same <code>TERMINAL_TOKEN</code> into the box on the left. It's stored only in this browser.</li>
+            </ol>
+            <p style="font-size:13px">Your balances and orders are fetched by this site's server with your key and are never cached or stored anywhere but this browser.</p>
+          </div>
+        </div>
+
         <div class="sub-head"><h3>Pipeline health</h3><span class="mono" id="dt-when"></span></div>
         <div class="table-wrap"><table class="data" id="dt-sources"></table></div>
 
@@ -232,7 +316,7 @@
   <footer class="site-footer">
     <div class="wrap mono">
       <span>KRAFT Terminal · For information only, not investment advice</span>
-      <span>Data: Yahoo Finance, Stooq, <a href="https://www.coingecko.com" target="_blank" rel="noopener">CoinGecko</a>, charts by TradingView</span>
+      <span>Data: CNBC, Nasdaq, Revolut X, <a href="https://www.coingecko.com" target="_blank" rel="noopener">CoinGecko</a>, charts by <a href="https://www.tradingview.com" target="_blank" rel="noopener">TradingView</a></span>
       <a href="https://elian.ink">elian.ink</a>
     </div>
   </footer>
@@ -244,6 +328,8 @@
 
   <div class="tip" id="tip" role="tooltip"></div>
 
+  <script src="/assets/vendor/lightweight-charts.js"></script>
+  <script src="/assets/chart.js"></script>
   <script src="/assets/assets.js"></script>
   <script src="/assets/app.js"></script>
 </body>

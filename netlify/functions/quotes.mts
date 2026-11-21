@@ -1,232 +1,117 @@
 // KRAFT Terminal — market data endpoint.
 //
-//   GET /api/quotes?stocks=COIN,MSTR,NVDA&crypto=bitcoin,hyperliquid
+//   GET /api/quotes?stocks=COIN,MSTR,NVDA&crypto=bitcoin,hyperliquid&rx=SOL-USD,AAVE-USD
 //
-// Runs on Netlify's servers, so the browser never has to reach Yahoo or
-// CoinGecko itself (Yahoo blocks browsers via CORS, and the free public CORS
-// proxies the old CRYPTERM build relied on are rate-limited or dead).
+// Runs on Netlify's servers so the browser only ever talks to its own domain.
+// (Tested from Netlify: Yahoo Finance answers 429 and Stooq/Cboe 403 there, so they're not used.)
 //
-// Sources, in order of preference:
-//   stocks  → Yahoo Finance v8 chart (1y daily: price, prev close, 7D, MA50/200, 52W, spark)
-//             + Yahoo v7 quote with cookie/crumb (market cap, analyst rating, target) — best effort
-//             → Stooq CSV fallback (price + prev close only) when Yahoo's chart fails
-//   crypto  → CoinGecko /coins/markets (price, 24h, 7D, mcap, volume, 7D sparkline)
-//             → CoinGecko /simple/price fallback
+//   stocks → CNBC quote service (one request for up to 40 symbols): price, previous close,
+//            volume, market cap, 52-week range, pre/post-market price
+//            + daily candles from our own /api/candles (CDN-cached): 7D, MA50/200, sparkline.
+//            If CNBC misses a symbol, the latest daily candle stands in for the price.
+//   crypto → CoinGecko /coins/markets (cg ids), CoinGecko /simple/price as fallback
+//   rx     → Revolut X public tickers, for coins without a CoinGecko id (e.g. your Revolut X holdings)
 //
-// Responses are cached on Netlify's CDN for 60s (and served stale for up to
-// 5 min while refreshing), so many open tabs cost the upstream APIs almost nothing.
+// Each response is cached on Netlify's CDN for 60s, so many open tabs cost the sources almost nothing.
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
-const SYM_RE = /^[A-Z0-9.\-^=]{1,15}$/;
+const SYM_RE = /^[A-Z0-9.\-]{1,12}$/;
 const CG_RE = /^[a-z0-9-]{1,60}$/;
-const MAX_SYMBOLS = 80;
+const RX_RE = /^[A-Z0-9]{1,12}-(USD|USDC|USDT|EUR|GBP)$/;
+const MAX = 80;
 const DAY = 86_400_000;
 
 type Quote = {
-  symbol: string;
-  name: string | null;
-  type: "stock" | "crypto";
-  price: number;
-  prevClose: number | null;
-  change: number | null;
-  changePct: number | null;
-  changePct7d: number | null;
-  volume: number | null;
-  marketCap: number | null;
-  w52High: number | null;
-  w52Low: number | null;
-  ma50: number | null;
-  ma200: number | null;
-  analystRating: number | null;
-  target: number | null;
-  exchange: string | null;
-  tv: string | null;
-  spark: number[];
-  marketState: string | null;
-  source: string;
-  asOf: number;
+  symbol: string; name: string | null; type: "stock" | "crypto";
+  price: number; prevClose: number | null; change: number | null; changePct: number | null; changePct7d: number | null;
+  volume: number | null; marketCap: number | null; w52High: number | null; w52Low: number | null;
+  ma50: number | null; ma200: number | null; analystRating: null; target: number | null;
+  exchange: string | null; tv: string | null; spark: number[];
+  marketState: string | null; ext: { price: number; change: number | null; changePct: number | null; session: string } | null;
+  source: string; asOf: number;
 };
 
-// ── helpers ────────────────────────────────────────────────────────────────
-const num = (v: unknown): number | null =>
-  typeof v === "number" && Number.isFinite(v) ? v : null;
-const round = (v: number | null, d = 6) =>
-  v == null ? null : Math.round(v * 10 ** d) / 10 ** d;
+const num = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (v == null || v === "") return null;
+  const x = parseFloat(String(v).replace(/[$,%\s]/g, ""));
+  return Number.isFinite(x) ? x : null;
+};
+const round = (v: number | null, d = 6) => (v == null ? null : Math.round(v * 10 ** d) / 10 ** d);
+const bigNum = (v: unknown) => {
+  const m = String(v ?? "").trim().match(/^([\d.,]+)\s*([KMBT])?$/i);
+  if (!m) return null;
+  const mult = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[(m[2] || "").toUpperCase() as "K"] || 1;
+  return parseFloat(m[1].replace(/,/g, "")) * mult;
+};
 
 async function getJSON(url: string, headers: Record<string, string> = {}, ms = 8000) {
-  const r = await fetch(url, {
-    headers: { "User-Agent": UA, Accept: "application/json", ...headers },
-    signal: AbortSignal.timeout(ms),
-  });
+  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json", ...headers }, signal: AbortSignal.timeout(ms) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
-
-async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
+async function pool<T>(items: T[], size: number, fn: (t: T) => Promise<void>) {
   let i = 0;
-  const workers = Array.from({ length: Math.min(size, items.length) }, async () => {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx]);
-    }
-  });
-  await Promise.all(workers);
-  return out;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => { while (i < items.length) await fn(items[i++]); }));
 }
 
-// Yahoo exchange codes → TradingView prefixes, so user-added tickers get the right chart.
-const TV_PREFIX: Record<string, string> = {
-  NMS: "NASDAQ", NGM: "NASDAQ", NCM: "NASDAQ", NAS: "NASDAQ", NIM: "NASDAQ",
-  NYQ: "NYSE", NYS: "NYSE", PCX: "AMEX", ASE: "AMEX", BTS: "CBOE", CBO: "CBOE",
-  TOR: "TSX", VAN: "TSXV", LSE: "LSE", PNK: "OTC", OQB: "OTC", OQX: "OTC",
-};
+const TV: Record<string, string> = { NASDAQ: "NASDAQ", NYSE: "NYSE", "NYSE ARCA": "AMEX", "NYSE AMERICAN": "AMEX", AMEX: "AMEX", CBOE: "CBOE", BATS: "CBOE" };
 
-// ── Yahoo v8 chart ─────────────────────────────────────────────────────────
-async function yahooChart(sym: string): Promise<Quote> {
-  const path = `v8/finance/chart/${encodeURIComponent(sym)}?range=1y&interval=1d&includePrePost=false`;
-  let data: any;
-  try {
-    data = await getJSON(`https://query1.finance.yahoo.com/${path}`);
-  } catch {
-    data = await getJSON(`https://query2.finance.yahoo.com/${path}`);
-  }
-  const res = data?.chart?.result?.[0];
-  const meta = res?.meta;
-  const price = num(meta?.regularMarketPrice);
-  if (!res || price == null) {
-    const msg = data?.chart?.error?.description || "no price in response";
-    throw new Error(msg);
-  }
-
-  // Pair timestamps with closes and drop nulls (Yahoo pads holidays with null).
-  const ts: number[] = res.timestamp || [];
-  const q = res.indicators?.quote?.[0] || {};
-  const bars: { t: number; c: number; h: number | null; l: number | null }[] = [];
-  ts.forEach((t, i) => {
-    const c = num(q.close?.[i]);
-    if (c != null) bars.push({ t: t * 1000, c, h: num(q.high?.[i]), l: num(q.low?.[i]) });
-  });
-
-  // Previous close: if the last bar is the current session, use the bar before it.
-  // (Never use meta.chartPreviousClose — that's the close at the START of the 1y range.)
-  const mktTime = (num(meta.regularMarketTime) ?? Date.now() / 1000) * 1000;
-  const last = bars.at(-1);
-  let prevClose: number | null =
-    num(meta.regularMarketPreviousClose) ?? num(meta.previousClose) ?? null;
-  if (prevClose == null && last) {
-    const lastIsCurrent = last.t >= mktTime - 20 * 3_600_000;
-    prevClose = lastIsCurrent ? bars.at(-2)?.c ?? null : last.c;
-  }
-
-  // 7D = vs the last close at or before one calendar week ago (matches CoinGecko's 7D).
-  const weekAgo = mktTime - 7 * DAY;
-  let ref7: number | null = null;
-  for (let i = bars.length - 1; i >= 0; i--) if (bars[i].t <= weekAgo) { ref7 = bars[i].c; break; }
-
-  const closes = bars.map((b) => b.c);
-  const ma = (n: number) => (closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null);
-  const highs = bars.map((b) => b.h).filter((v): v is number => v != null);
-  const lows = bars.map((b) => b.l).filter((v): v is number => v != null);
-
-  const exch = meta.exchangeName || null;
-  const prefix = exch ? TV_PREFIX[exch] : null;
-  return {
-    symbol: sym,
-    name: meta.longName || meta.shortName || null,
-    type: "stock",
-    price,
-    prevClose,
-    change: prevClose != null ? round(price - prevClose) : null,
-    changePct: prevClose ? round(((price - prevClose) / prevClose) * 100, 4) : null,
-    changePct7d: ref7 ? round(((price - ref7) / ref7) * 100, 4) : null,
-    volume: num(meta.regularMarketVolume),
-    marketCap: null,
-    w52High: num(meta.fiftyTwoWeekHigh) ?? (highs.length ? Math.max(...highs) : null),
-    w52Low: num(meta.fiftyTwoWeekLow) ?? (lows.length ? Math.min(...lows) : null),
-    ma50: round(ma(50), 4),
-    ma200: round(ma(200), 4),
-    analystRating: null,
-    target: null,
-    exchange: meta.fullExchangeName || exch,
-    tv: prefix && !sym.includes("-") && !sym.includes("=") ? `${prefix}:${sym.replace(/\..*$/, "")}` : null,
-    spark: closes.slice(-30).map((c) => round(c, 4) as number),
-    marketState: null,
-    source: "yahoo",
-    asOf: mktTime,
-  };
-}
-
-// ── Yahoo v7 quote (needs a cookie + crumb; best effort) ────────────────────
-let crumbCache: { cookie: string; crumb: string; at: number } | null = null;
-
-async function yahooCrumb() {
-  if (crumbCache && Date.now() - crumbCache.at < 30 * 60_000) return crumbCache;
-  const r = await fetch("https://fc.yahoo.com/", {
-    headers: { "User-Agent": UA },
-    redirect: "manual",
-    signal: AbortSignal.timeout(5000),
-  });
-  const setCookie = (r.headers as any).getSetCookie?.() ?? [r.headers.get("set-cookie") || ""];
-  const cookie = setCookie.map((c: string) => c.split(";")[0]).filter(Boolean).join("; ");
-  if (!cookie) throw new Error("no cookie");
-  const cr = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", {
-    headers: { "User-Agent": UA, Cookie: cookie },
-    signal: AbortSignal.timeout(5000),
-  });
-  const crumb = (await cr.text()).trim();
-  if (!cr.ok || !crumb || crumb.length > 40 || crumb.includes("<")) throw new Error("no crumb");
-  crumbCache = { cookie, crumb, at: Date.now() };
-  return crumbCache;
-}
-
-async function yahooQuoteBatch(syms: string[]): Promise<Record<string, any>> {
-  if (!syms.length) return {};
-  const { cookie, crumb } = await yahooCrumb();
-  const fields = [
-    "marketCap", "averageAnalystRating", "targetMeanPrice", "marketState",
-    "regularMarketPreviousClose", "longName", "shortName", "regularMarketVolume",
-  ].join(",");
-  const out: Record<string, any> = {};
+// ── CNBC batch quotes ─────────────────────────────────────────────────────
+async function cnbc(syms: string[]): Promise<Record<string, Quote>> {
+  const out: Record<string, Quote> = {};
   for (let i = 0; i < syms.length; i += 40) {
     const chunk = syms.slice(i, i + 40);
-    const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(
-      chunk.join(","),
-    )}&fields=${fields}&crumb=${encodeURIComponent(crumb)}`;
-    const d = await getJSON(url, { Cookie: cookie });
-    for (const q of d?.quoteResponse?.result || []) out[q.symbol] = q;
+    const url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=" +
+      encodeURIComponent(chunk.join("|")) + "&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json";
+    const d: any = await getJSON(url);
+    const list: any[] = [].concat(d?.FormattedQuoteResult?.FormattedQuote || []);
+    for (const q of list) {
+      const sym = String(q.symbol || "").toUpperCase();
+      const price = num(q.last);
+      if (!chunk.includes(sym) || price == null || String(q.code) !== "0") continue;
+      const prev = num(q.previous_day_closing);
+      const x = q.ExtendedMktQuote;
+      const xp = num(x?.last);
+      const exch = String(q.exchange || "").toUpperCase();
+      out[sym] = {
+        symbol: sym, name: q.altName || q.name || null, type: "stock", price,
+        prevClose: prev, change: num(q.change) ?? (prev != null ? round(price - prev) : null),
+        changePct: num(q.change_pct) ?? (prev ? round(((price - prev) / prev) * 100, 4) : null),
+        changePct7d: null, volume: num(q.volume), marketCap: bigNum(q.mktcapView),
+        w52High: num(q.yrhiprice), w52Low: num(q.yrloprice), ma50: null, ma200: null, analystRating: null, target: null,
+        exchange: q.exchange || null, tv: TV[exch] ? `${TV[exch]}:${sym}` : null, spark: [],
+        marketState: q.curmktstatus || null,
+        ext: xp != null && x?.type ? { price: xp, change: num(x.change), changePct: num(x.change_pct), session: String(x.type) } : null,
+        source: "cnbc", asOf: Date.parse(q.last_timedate) || Date.now(),
+      };
+    }
   }
   return out;
 }
 
-// ── Stooq fallback (US listings only) ──────────────────────────────────────
-async function stooq(sym: string): Promise<Quote> {
-  const s = sym.includes(".") || sym.includes("-") ? sym.toLowerCase() : `${sym.toLowerCase()}.us`;
-  const r = await fetch(`https://stooq.com/q/l/?s=${encodeURIComponent(s)}&f=sd2t2ohlcvpn&h&e=csv`, {
-    headers: { "User-Agent": UA },
-    signal: AbortSignal.timeout(6000),
-  });
-  if (!r.ok) throw new Error(`stooq HTTP ${r.status}`);
-  const [head, row] = (await r.text()).trim().split(/\r?\n/);
-  if (!row) throw new Error("stooq: empty");
-  const cols = head.toLowerCase().split(",");
-  const vals = row.split(",");
-  const get = (k: string) => vals[cols.indexOf(k)];
-  const price = parseFloat(get("close"));
-  if (!Number.isFinite(price)) throw new Error("stooq: no data");
-  const prev = parseFloat(get("prev"));
-  const prevClose = Number.isFinite(prev) ? prev : null;
-  const vol = parseFloat(get("volume"));
-  return {
-    symbol: sym, name: get("name") || null, type: "stock", price, prevClose,
-    change: prevClose != null ? round(price - prevClose) : null,
-    changePct: prevClose ? round(((price - prevClose) / prevClose) * 100, 4) : null,
-    changePct7d: null, volume: Number.isFinite(vol) ? vol : null, marketCap: null,
-    w52High: null, w52Low: null, ma50: null, ma200: null, analystRating: null, target: null,
-    exchange: null, tv: null, spark: [], marketState: null, source: "stooq",
-    asOf: Date.parse(`${get("date")}T${get("time") || "00:00:00"}Z`) || Date.now(),
-  };
+// ── history from our own candles endpoint (CDN-cached) ──────────────────────
+async function history(origin: string, s: string, k: "stock" | "crypto"): Promise<number[][]> {
+  const r = await fetch(`${origin}/api/candles?s=${encodeURIComponent(s)}&k=${k}&tf=1D`, { signal: AbortSignal.timeout(12000) });
+  if (!r.ok) throw new Error(`candles HTTP ${r.status}`);
+  const d: any = await r.json();
+  return d.bars || [];
+}
+function applyHistory(q: Partial<Quote>, bars: number[][], price: number) {
+  const closes = bars.map((b) => b[4]);
+  const ma = (n: number) => (closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null);
+  const weekAgo = (Date.now() - 7 * DAY) / 1000;
+  let ref: number | null = null;
+  for (let i = bars.length - 1; i >= 0; i--) if (bars[i][0] <= weekAgo) { ref = bars[i][4]; break; }
+  q.changePct7d = ref ? round(((price - ref) / ref) * 100, 4) : null;
+  q.ma50 = round(ma(50), 4);
+  q.ma200 = round(ma(200), 4);
+  q.spark = [...closes.slice(-29), price].map((c) => round(c, 6) as number);
+  if (q.w52High == null && bars.length) {
+    const yr = bars.filter((b) => b[0] >= Date.now() / 1000 - 365 * 86400);
+    q.w52High = Math.max(...yr.map((b) => b[2])); q.w52Low = Math.min(...yr.map((b) => b[3]));
+  }
 }
 
 // ── CoinGecko ──────────────────────────────────────────────────────────────
@@ -235,143 +120,129 @@ async function coingecko(ids: string[]): Promise<Record<string, Quote>> {
   const key = Netlify.env.get("COINGECKO_DEMO_KEY");
   const hdr: Record<string, string> = key ? { "x-cg-demo-api-key": key } : {};
   const out: Record<string, Quote> = {};
+  const base = (id: string, price: number): Quote => ({
+    symbol: id, name: null, type: "crypto", price, prevClose: null, change: null, changePct: null, changePct7d: null,
+    volume: null, marketCap: null, w52High: null, w52Low: null, ma50: null, ma200: null, analystRating: null, target: null,
+    exchange: null, tv: null, spark: [], marketState: "24/7", ext: null, source: "coingecko", asOf: Date.now(),
+  });
   try {
     const d: any[] = await getJSON(
       `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${ids.join(",")}` +
-        `&price_change_percentage=24h,7d&sparkline=true&per_page=${ids.length}&page=1`,
-      hdr,
-    );
+        `&price_change_percentage=24h,7d&sparkline=true&per_page=${ids.length}&page=1`, hdr);
     for (const c of d) {
       const price = num(c.current_price);
       if (price == null) continue;
       const ch = num(c.price_change_24h);
-      const sp: number[] = c.sparkline_in_7d?.price || [];
       out[c.id] = {
-        symbol: c.id, name: c.name, type: "crypto", price,
-        prevClose: ch != null ? price - ch : null, change: ch,
+        ...base(c.id, price), name: c.name, prevClose: ch != null ? price - ch : null, change: ch,
         changePct: num(c.price_change_percentage_24h_in_currency) ?? num(c.price_change_percentage_24h),
-        changePct7d: num(c.price_change_percentage_7d_in_currency),
-        volume: num(c.total_volume), marketCap: num(c.market_cap),
-        w52High: null, w52Low: null, ma50: null, ma200: null, analystRating: null, target: null,
-        exchange: null, tv: null,
-        // 7 days of hourly points → thin to ~42 so the payload stays small
-        spark: sp.filter((_, i) => i % 4 === 0).map((v) => round(v, 6) as number),
-        marketState: "24/7", source: "coingecko",
+        changePct7d: num(c.price_change_percentage_7d_in_currency), volume: num(c.total_volume), marketCap: num(c.market_cap),
+        spark: (c.sparkline_in_7d?.price || []).filter((_: number, i: number) => i % 4 === 0).map((v: number) => round(v, 6) as number),
         asOf: Date.parse(c.last_updated) || Date.now(),
       };
     }
   } catch {
     const d: any = await getJSON(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd` +
-        `&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true`,
-      hdr,
-    );
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true`, hdr);
     for (const [id, v] of Object.entries<any>(d)) {
       const price = num(v.usd);
       if (price == null) continue;
-      const pct = num(v.usd_24h_change);
-      const prev = pct != null ? price / (1 + pct / 100) : null;
-      out[id] = {
-        symbol: id, name: null, type: "crypto", price, prevClose: prev,
-        change: prev != null ? price - prev : null, changePct: pct, changePct7d: null,
-        volume: num(v.usd_24h_vol), marketCap: num(v.usd_market_cap),
-        w52High: null, w52Low: null, ma50: null, ma200: null, analystRating: null, target: null,
-        exchange: null, tv: null, spark: [], marketState: "24/7", source: "coingecko-simple",
-        asOf: (num(v.last_updated_at) ?? Date.now() / 1000) * 1000,
-      };
+      const pct = num(v.usd_24h_change), prev = pct != null ? price / (1 + pct / 100) : null;
+      out[id] = { ...base(id, price), prevClose: prev, change: prev != null ? price - prev : null, changePct: pct,
+        volume: num(v.usd_24h_vol), marketCap: num(v.usd_market_cap), source: "coingecko-simple" };
     }
   }
   return out;
 }
 
+// ── Revolut X public tickers ────────────────────────────────────────────────
+async function revxTickers(pairs: string[]): Promise<Record<string, Quote>> {
+  if (!pairs.length) return {};
+  const d: any = await getJSON(`https://revx.revolut.com/api/1.0/public/tickers?symbols=${encodeURIComponent(pairs.map((p) => p.replace("-", "/")).join(","))}`);
+  const out: Record<string, Quote> = {};
+  for (const t of d?.data || []) {
+    const pair = String(t.symbol).replace("/", "-");
+    const price = num(t.last_price) ?? num(t.mid);
+    if (price == null) continue;
+    const ch = num(t.price_change_24h), prev = ch != null ? price - ch : null;
+    out[pair] = {
+      symbol: pair, name: null, type: "crypto", price, prevClose: prev, change: ch,
+      changePct: prev ? round(((price - prev) / prev) * 100, 4) : null, changePct7d: null,
+      volume: num(t.quote_volume_24h), marketCap: null, w52High: null, w52Low: null, ma50: null, ma200: null,
+      analystRating: null, target: null, exchange: "Revolut X", tv: null, spark: [], marketState: "24/7", ext: null,
+      source: "revolut-x", asOf: Date.now(),
+    };
+  }
+  return out;
+}
+
 // ── handler ────────────────────────────────────────────────────────────────
-const parseList = (v: string | null, re: RegExp, upper: boolean) =>
-  [...new Set((v || "").split(",").map((s) => (upper ? s.trim().toUpperCase() : s.trim().toLowerCase())))]
-    .filter((s) => re.test(s))
-    .slice(0, MAX_SYMBOLS);
+const list = (v: string | null, re: RegExp, up: boolean) =>
+  [...new Set((v || "").split(",").map((s) => (up ? s.trim().toUpperCase() : s.trim().toLowerCase())))].filter((s) => re.test(s)).slice(0, MAX);
 
 export default async (req: Request) => {
   const url = new URL(req.url);
-  const stocks = parseList(url.searchParams.get("stocks"), SYM_RE, true);
-  const crypto = parseList(url.searchParams.get("crypto"), CG_RE, false);
+  const stocks = list(url.searchParams.get("stocks"), SYM_RE, true);
+  const crypto = list(url.searchParams.get("crypto"), CG_RE, false);
+  const rx = list(url.searchParams.get("rx"), RX_RE, true);
 
   const quotes: Record<string, Quote> = {};
   const errors: Record<string, string> = {};
-  const sources: Record<string, { ok: number; fail: number; note?: string }> = {
-    "yahoo-chart": { ok: 0, fail: 0 },
-    "yahoo-quote": { ok: 0, fail: 0 },
-    stooq: { ok: 0, fail: 0 },
-    coingecko: { ok: 0, fail: 0 },
-  };
+  const src = (k: string) => (sources[k] ||= { ok: 0, fail: 0 });
+  const sources: Record<string, { ok: number; fail: number; note?: string }> = {};
 
-  const [, extra, cg] = await Promise.all([
-    pool(stocks, 8, async (sym) => {
-      try {
-        quotes[sym] = await yahooChart(sym);
-        sources["yahoo-chart"].ok++;
-      } catch (e: any) {
-        sources["yahoo-chart"].fail++;
-        try {
-          quotes[sym] = await stooq(sym);
-          sources.stooq.ok++;
-        } catch (e2: any) {
-          sources.stooq.fail++;
-          errors[sym] = `yahoo: ${e?.message}; stooq: ${e2?.message}`;
-        }
-      }
-    }),
-    yahooQuoteBatch(stocks).catch((e) => {
-      sources["yahoo-quote"].note = String(e?.message || e);
-      return {} as Record<string, any>;
-    }),
-    coingecko(crypto).catch((e) => {
-      sources.coingecko.note = String(e?.message || e);
-      return {} as Record<string, Quote>;
-    }),
+  const [cq, hist, cg, rq] = await Promise.all([
+    cnbc(stocks).catch((e) => { src("cnbc").note = String(e?.message || e); return {} as Record<string, Quote>; }),
+    (async () => {
+      const h: Record<string, number[][]> = {};
+      await pool([...stocks.map((s) => [s, "stock"]), ...rx.map((s) => [s, "crypto"])] as [string, "stock" | "crypto"][], 8, async ([s, k]) => {
+        try { h[s] = await history(url.origin, s, k); src("history").ok++; }
+        catch (e: any) { src("history").fail++; h[s] = []; if (!errors[s]) errors[s] = `history: ${e?.message}`; }
+      });
+      return h;
+    })(),
+    coingecko(crypto).catch((e) => { src("coingecko").note = String(e?.message || e); return {} as Record<string, Quote>; }),
+    revxTickers(rx).catch((e) => { src("revolut-x").note = String(e?.message || e); return {} as Record<string, Quote>; }),
   ]);
 
-  // Merge v7 extras (market cap, analyst data) into the chart quotes.
-  for (const sym of stocks) {
-    const x = extra[sym];
-    const q = quotes[sym];
-    if (!x || !q) continue;
-    sources["yahoo-quote"].ok++;
-    q.marketCap = num(x.marketCap);
-    q.target = num(x.targetMeanPrice);
-    q.marketState = x.marketState || null;
-    if (typeof x.averageAnalystRating === "string") q.analystRating = parseFloat(x.averageAnalystRating) || null;
-    if (!q.name) q.name = x.longName || x.shortName || null;
-    // Stooq fallback has no real-time previous close context; v7 does.
-    if (q.source === "stooq" && num(x.regularMarketPreviousClose) != null) {
-      q.prevClose = x.regularMarketPreviousClose;
-      q.change = round(q.price - x.regularMarketPreviousClose);
-      q.changePct = round(((q.price - x.regularMarketPreviousClose) / x.regularMarketPreviousClose) * 100, 4);
+  for (const s of stocks) {
+    let q = cq[s];
+    const bars = hist[s] || [];
+    if (q) src("cnbc").ok++; else src("cnbc").fail++;
+    if (!q && bars.length) {
+      // CNBC missed it: use the latest daily candle as the price.
+      const last = bars.at(-1)!, prev = bars.at(-2)?.[4] ?? null;
+      q = {
+        symbol: s, name: null, type: "stock", price: last[4], prevClose: prev,
+        change: prev != null ? round(last[4] - prev) : null, changePct: prev ? round(((last[4] - prev) / prev) * 100, 4) : null,
+        changePct7d: null, volume: last[5], marketCap: null, w52High: null, w52Low: null, ma50: null, ma200: null,
+        analystRating: null, target: null, exchange: null, tv: null, spark: [], marketState: null, ext: null,
+        source: "daily-candle", asOf: last[0] * 1000,
+      };
     }
+    if (!q) { errors[s] = errors[s] ? `quote: not found; ${errors[s]}` : "quote: not found (check the ticker is US-listed)"; continue; }
+    if (bars.length) { applyHistory(q, bars, q.price); delete errors[s]; }
+    quotes[s] = q;
   }
-  if (stocks.length && !Object.keys(extra).length) sources["yahoo-quote"].fail = 1;
-
   for (const id of crypto) {
-    if (cg[id]) { quotes[`cg:${id}`] = cg[id]; sources.coingecko.ok++; }
-    else { sources.coingecko.fail++; errors[`cg:${id}`] = sources.coingecko.note || "not returned"; }
+    if (cg[id]) { quotes[`cg:${id}`] = cg[id]; src("coingecko").ok++; }
+    else { src("coingecko").fail++; errors[`cg:${id}`] = sources.coingecko?.note || "not returned"; }
+  }
+  for (const p of rx) {
+    const q = rq[p];
+    if (!q) { src("revolut-x").fail++; errors[`rx:${p}`] = sources["revolut-x"]?.note || "pair not found on Revolut X"; continue; }
+    src("revolut-x").ok++;
+    if (hist[p]?.length) { applyHistory(q, hist[p], q.price); delete errors[p]; }
+    quotes[`rx:${p}`] = q;
   }
 
-  const body = {
-    updatedAt: Date.now(),
-    requested: { stocks: stocks.length, crypto: crypto.length },
-    quotes,
-    errors,
-    sources,
-  };
-  const allFailed = stocks.length + crypto.length > 0 && Object.keys(quotes).length === 0;
-  return new Response(JSON.stringify(body), {
+  const allFailed = stocks.length + crypto.length + rx.length > 0 && !Object.keys(quotes).length;
+  return new Response(JSON.stringify({ updatedAt: Date.now(), quotes, errors, sources }), {
     status: allFailed ? 502 : 200,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      // Browser keeps it 30s; Netlify's CDN 60s, then serves stale up to 5 min while refetching.
       "cache-control": "public, max-age=30",
-      "netlify-cdn-cache-control": allFailed
-        ? "no-store"
-        : "public, durable, s-maxage=60, stale-while-revalidate=300",
+      "netlify-cdn-cache-control": allFailed ? "no-store" : "public, durable, s-maxage=60, stale-while-revalidate=300",
     },
   });
 };

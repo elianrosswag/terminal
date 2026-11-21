@@ -1,5 +1,5 @@
 // KRAFT Terminal — asset universe.
-// type 'stock' → fetched by Yahoo symbol (sym). type 'crypto' → fetched from CoinGecko by cg id.
+// type 'stock' → US ticker (CNBC / Nasdaq). type 'crypto' → CoinGecko id (cg) for prices, Revolut X pair for candles.
 // tv = TradingView symbol. grp = group used for filters and the heatmap.
 // Descriptions describe the business model; figures that go stale quickly
 // (holdings, hashrate, AUM) are left out on purpose.
@@ -10,11 +10,11 @@ window.KRAFT_GROUPS = [
 
 window.KRAFT_ASSETS = [
   // CRYPTO
-  { sym: 'BTC', cg: 'bitcoin', tv: 'BINANCE:BTCUSDT', type: 'crypto', grp: 'Crypto', cat: 'L1 / store of value', name: 'Bitcoin',
+  { sym: 'BTC', cg: 'bitcoin', pair: 'BTC-USD', tv: 'BINANCE:BTCUSDT', type: 'crypto', grp: 'Crypto', cat: 'L1 / store of value', name: 'Bitcoin',
     desc: 'Fixed 21 million supply, proof-of-work. The reference asset for everything else on this sheet: miners, treasuries and ETFs all trade as BTC proxies.' },
-  { sym: 'ETH', cg: 'ethereum', tv: 'BINANCE:ETHUSDT', type: 'crypto', grp: 'Crypto', cat: 'L1 / smart contracts', name: 'Ethereum',
+  { sym: 'ETH', cg: 'ethereum', pair: 'ETH-USD', tv: 'BINANCE:ETHUSDT', type: 'crypto', grp: 'Crypto', cat: 'L1 / smart contracts', name: 'Ethereum',
     desc: 'The main settlement layer for stablecoins, tokenised assets and DeFi. Proof-of-stake; ETH is used to pay for blockspace.' },
-  { sym: 'HYPE', cg: 'hyperliquid', tv: 'BYBIT:HYPEUSDT', type: 'crypto', grp: 'Crypto', cat: 'DeFi / perps DEX', name: 'Hyperliquid',
+  { sym: 'HYPE', cg: 'hyperliquid', pair: 'HYPE-USD', tv: 'BYBIT:HYPEUSDT', type: 'crypto', grp: 'Crypto', cat: 'DeFi / perps DEX', name: 'Hyperliquid',
     desc: 'Token of Hyperliquid, the largest on-chain perpetual futures exchange, running on its own L1. Exchange revenue funds token buybacks.' },
 
   // EXCHANGES & BROKERS
